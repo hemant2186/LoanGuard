@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Playwright
+static/evidence/*.png
+!static/evidence/.gitkeep
+
+# Logs
+*.log
