@@ -49,6 +49,16 @@ def test_production_cors_allows_vercel_frontend(client):
     assert response.headers["access-control-allow-origin"] == "https://loanguard-five.vercel.app"
 
 
+def test_frontend_uses_render_backend_and_validates_health_status():
+    index_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "index.html")
+    with open(index_path, encoding="utf-8") as file:
+        source = file.read()
+    assert "https://loanguard-sqcb.onrender.com" in source
+    assert "if(h.status !== 'ok')" in source
+    assert "fetch(apiUrl('/api/health'))" in source
+    assert "apiUrl('/api/watch')" in source
+
+
 def test_investigate_empty_name(client):
     response = client.get("/api/investigate?name=")
     assert response.status_code == 400

@@ -526,7 +526,10 @@ renderTimeline();
 fetch(apiUrl('/api/health')).then(r=>{
   if(!r.ok) throw new Error(`Backend health returned ${r.status}`);
   return r.json();
-}).then(h=>setModeTag(h.demo_mode)).catch(()=>{
+}).then(h=>{
+  if(h.status !== 'ok') throw new Error('Backend health response was not healthy');
+  setModeTag(h.demo_mode);
+}).catch(()=>{
   const badge = document.getElementById('mode-badge');
   if(badge) badge.textContent = 'BACKEND UNAVAILABLE';
 });
