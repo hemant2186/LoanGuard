@@ -29,11 +29,13 @@ async def create_monitor(webhook_url: str | None = None, schedule_cron: str = "0
     }
     if not has_api_key():
         out["error"] = "TINYFISH_API_KEY not configured"
+        out["status"] = "unavailable"
         return out
     try:
         client = _client()
     except Exception as exc:  # pragma: no cover
         out["error"] = f"SDK init failed: {exc}"
+        out["status"] = "unavailable"
         return out
 
     config = {"url": get_rbi_url(), "format": "markdown"}
@@ -52,6 +54,7 @@ async def create_monitor(webhook_url: str | None = None, schedule_cron: str = "0
         name = type(exc).__name__
         msg = str(exc)
         out["error"] = f"{name}: {msg}"
+        out["status"] = "unavailable"
         # 402 / 404 / beta-not-enabled signals
         low = (name + " " + msg).lower()
         if "404" in low or "not found" in low or "not enabled" in low or "beta" in low:

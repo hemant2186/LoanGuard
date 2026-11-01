@@ -69,9 +69,11 @@ def _load_sample() -> dict[str, Any]:
 
 def _build_indicators(rbi: dict, fetch: dict) -> Indicators:
     ind = fetch.get("indicators", {}) if fetch else {}
+    fetch_ok = bool(fetch.get("ok", True)) if fetch else False
     return Indicators(
         rbi_checked=bool(rbi.get("checked", False)),
         rbi_found=bool(rbi.get("found", False)),
+        fetch_checked=fetch_ok,
         grievance_found=bool(ind.get("grievance_found", False)),
         lending_partner_found=bool(ind.get("lending_partner_found", False)),
         address_found=bool(ind.get("address_found", False)),
@@ -115,10 +117,13 @@ def _build_report(name: str, site: str | None, demo: bool, search: dict, rbi: di
         "indicators": {
             "rbi_checked": bool(rbi.get("checked", False)),
             "rbi_found": bool(rbi.get("found", False)),
+            "fetch_checked": bool(fetch and fetch.get("ok")),
             "grievance_found": bool(fetch.get("indicators", {}).get("grievance_found", False)),
             "lending_partner_found": bool(fetch.get("indicators", {}).get("lending_partner_found", False)),
             "address_found": bool(fetch.get("indicators", {}).get("address_found", False)),
             "interest_rate_found": bool(fetch.get("indicators", {}).get("interest_rate_found", False)),
+            "terms_found": bool(fetch.get("indicators", {}).get("terms_found", False)),
+            "privacy_found": bool(fetch.get("indicators", {}).get("privacy_found", False)),
             "complaint_count": int(fetch.get("indicators", {}).get("complaint_count", 0) or 0),
         },
         "disclaimer": DISCLAIMER,
@@ -151,8 +156,8 @@ async def investigate_stream(name: str, site: str | None) -> AsyncGenerator[str,
                                "data": sample["browser"], "demo": True})
         yield _sse("research", {"status": "completed", "message": "Cited findings prepared (sample).",
                                 "data": sample["research"], "demo": True})
-        yield _sse("monitor", {"status": "available",
-                               "message": "SIMULATED MONITOR — SAMPLE DATA. Click Monitor to simulate.", "demo": True})
+        yield _sse("monitor", {"status": "pending",
+                               "message": "Monitor is not created until you click Monitor RBI directory.", "demo": True})
         yield _sse("scoring", {"status": "completed", "message": "Risk score computed (sample).",
                                "data": sample["score"], "demo": True})
         report = _build_report(report_name, report_site, True, sample["search"], sample["rbi"], sample["fetch"],
@@ -160,61 +165,93 @@ async def investigate_stream(name: str, site: str | None) -> AsyncGenerator[str,
         yield _sse("final", {"status": "completed", "report": report, "demo": True})
         return
 
-    # ---------------- LIVE MODE ----------------
+    # ---------------- LIVE MODE (DEMO_MODE=0) ----------------
     if not has_api_key():
         yield _sse("error", {"status": "failed",
-                             "message": "Live mode is on but TINYFISH_API_KEY is not configured. Set the key or enable DEMO_MODE=1."})
+                             "message": "Live mode is on but TINYFISH_API_KEY is not configured. Set the key in .env or switch to DEMO_MODE=1."})
         yield _sse("final", {"status": "failed", "report": {"app_name": name, "site": site or "", "demo": False,
                          "error": "API key not configured", "disclaimer": DISCLAIMER}})
         return
 
-    # 1. SEARCH
-    yield _sse("search", {"status": "started", "message": "Discovering public evidence..."})
-    search = await search_loan_app(name)
-    yield _sse("search", {"status": "completed", "message": "Public evidence discovered.",
-                          "data": search})
+    # 1. SEARCH — Real Public Web Discovery
+    yield _sse("search", {"status": "started", "message": f"Discovering public evidence for '{name}' across web indices..."})
+    search = await search_loan_app(name, site=site)
+    search_ok = bool(search.get("ok"))
+    search_status = search.get("status", "completed" if search_ok else "failed")
+    search_count = len(search.get("results", []))
+    search_msg = (
+        f"Public evidence discovered ({search_count} sources found)."
+        if search_ok
+        else f"Public evidence discovery failed: {search.get('error', 'No results returned')}"
+    )
+    yield _sse("search", {"status": search_status, "message": search_msg, "data": search})
 
-    # 2. AGENT (RBI directory)
-    yield _sse("agent", {"status": "started", "message": "Checking the RBI directory..."})
+    effective_site = site or search.get("identified_site")
+
+    # 2. AGENT — Real RBI Directory Investigation
+    yield _sse("agent", {"status": "started", "message": "Investigating official RBI digital lending apps directory..."})
     rbi = await check_rbi_directory(name)
-    yield _sse("agent", {"status": "completed",
-                         "message": "RBI directory checked." if rbi.get("checked") else "RBI directory lookup completed (check status).",
-                         "data": rbi})
+    agent_status = rbi.get("status", "completed" if rbi.get("checked") else "unavailable")
+    if rbi.get("checked"):
+        agent_msg = f"RBI directory check completed: {'Found in directory' if rbi.get('found') else 'Not listed in directory'}."
+    elif agent_status == "timed out":
+        agent_msg = "RBI directory check timed out (verification incomplete; this does not indicate absence)."
+    else:
+        agent_msg = f"RBI directory check unavailable ({rbi.get('failure_reason') or rbi.get('error') or 'Unreachable'})."
+    yield _sse("agent", {"status": agent_status, "message": agent_msg, "data": rbi})
 
-    # 3. FETCH
-    yield _sse("fetch", {"status": "started", "message": "Inspecting public websites..."})
-    urls = _collect_fetch_urls(site, search)
-    fetch = await fetch_pages(urls, purpose=f"Investigate the loan app {name} for risk indicators")
-    yield _sse("fetch", {"status": "completed", "message": "Public websites inspected.", "data": fetch})
+    # 3. FETCH — Real Website Investigation
+    yield _sse("fetch", {"status": "started", "message": "Inspecting public websites and regulatory disclosures..."})
+    urls = _collect_fetch_urls(effective_site, search)
+    fetch = await fetch_pages(urls, purpose=f"Investigate the loan app {name} for risk indicators and regulatory disclosures")
+    fetch_ok = bool(fetch.get("ok"))
+    fetch_status = fetch.get("status", "completed" if fetch_ok else "failed")
+    fetch_count = len(fetch.get("results", []))
+    fetch_msg = (
+        f"Public websites inspected ({fetch_count} pages analyzed)."
+        if fetch_ok
+        else f"Public website inspection failed: {fetch.get('error', 'Could not access pages')}"
+    )
+    yield _sse("fetch", {"status": fetch_status, "message": fetch_msg, "data": fetch})
 
-    # 4. BROWSER (visual evidence)
-    yield _sse("browser", {"status": "started", "message": "Capturing visual evidence..."})
-    shot_url = site or (search["results"][0]["url"] if search.get("results") else "")
+    # 4. BROWSER — Real Visual Evidence Capture
+    yield _sse("browser", {"status": "started", "message": "Capturing visual evidence via remote browser session..."})
+    shot_url = effective_site or (search["results"][0]["url"] if search.get("results") else "")
     if shot_url:
         browser = await capture_screenshot(shot_url, name)
     else:
-        browser = {"ok": False, "error": "No website URL available to screenshot"}
-    yield _sse("browser", {"status": "completed", "message": "Visual evidence captured." if browser.get("ok") else "Visual evidence capture failed.",
-                           "data": browser})
+        browser = {"ok": False, "status": "failed", "error": "No website URL available for visual evidence capture"}
+    browser_status = browser.get("status", "completed" if browser.get("ok") else "failed")
+    browser_msg = (
+        "Visual evidence captured."
+        if browser.get("ok")
+        else f"Visual evidence capture failed: {browser.get('error', 'Capture failed')}"
+    )
+    yield _sse("browser", {"status": browser_status, "message": browser_msg, "data": browser})
 
-    # 5. RESEARCH (non-blocking)
-    yield _sse("research", {"status": "started", "message": "Preparing cited findings (this can take several minutes)..."})
-    research = await run_research(name, site)
-    yield _sse("research", {"status": research.get("status", "completed"),
-                            "message": "Cited findings prepared." if research.get("ok") else "Research still running or unavailable — not blocking the report.",
-                            "data": research})
+    # 5. RESEARCH — Real Cited Report
+    yield _sse("research", {"status": "started", "message": "Preparing cited analytical findings..."})
+    research = await run_research(name, effective_site)
+    research_status = research.get("status", "completed" if research.get("ok") else "pending")
+    if research.get("ok"):
+        research_msg = f"Cited research report prepared ({len(research.get('citations', []))} citations)."
+    elif research_status == "pending":
+        research_msg = "Research pending (deep mode executes in background; not blocking investigation)."
+    else:
+        research_msg = f"Research unavailable: {research.get('error', 'Service unavailable')}"
+    yield _sse("research", {"status": research_status, "message": research_msg, "data": research})
 
-    # 6. MONITOR stage (informational — created on demand only)
-    yield _sse("monitor", {"status": "available",
-                           "message": "Monitoring available on demand — click Monitor to create a watch on the RBI directory."})
+    # 6. MONITOR — Real Monitor Stage (On-demand)
+    yield _sse("monitor", {"status": "pending",
+                           "message": "Monitor is not created until you click Monitor RBI directory."})
 
-    # SCORING
+    # SCORING — Evidence-Based Risk Engine
     indicators = _build_indicators(rbi, fetch)
     score = compute_score(indicators)
-    yield _sse("scoring", {"status": "completed", "message": "Risk score computed.", "data": score})
+    yield _sse("scoring", {"status": "completed", "message": f"Risk score computed: {score['score']}/100 ({score['verdict']}).", "data": score})
 
-    # FINAL
-    report = _build_report(name, site, False, search, rbi, fetch, browser, research, score)
+    # FINAL — Assembled Intelligence Dossier
+    report = _build_report(name, effective_site, False, search, rbi, fetch, browser, research, score)
     yield _sse("final", {"status": "completed", "report": report})
 
 

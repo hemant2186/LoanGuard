@@ -34,6 +34,7 @@ from .config import VERDICT_HIGH, VERDICT_LOW, VERDICT_UNCLEAR
 class Indicators:
     rbi_checked: bool = False
     rbi_found: bool = False
+    fetch_checked: bool = True  # True if at least one public source was successfully inspected
     grievance_found: bool = False
     lending_partner_found: bool = False
     address_found: bool = False
@@ -63,29 +64,36 @@ def compute_score(ind: Indicators) -> dict[str, Any]:
             }
         )
 
-    if not ind.grievance_found:
-        score -= 10
-        deductions.append(
-            {"reason": "No grievance redressal details found in inspected sources", "points": 10}
-        )
+    # Missing-information deductions: Only apply when the relevant public source
+    # has actually been successfully inspected. If Fetch fails, do not assume
+    # the information is absent.
+    if ind.fetch_checked:
+        if not ind.grievance_found:
+            score -= 10
+            deductions.append(
+                {"reason": "No grievance redressal details found in inspected sources", "points": 10}
+            )
 
-    if not ind.lending_partner_found:
-        score -= 15
-        deductions.append(
-            {"reason": "No named lending partner (NBFC / bank) found in inspected sources", "points": 15}
-        )
+        if not ind.lending_partner_found:
+            score -= 15
+            deductions.append(
+                {"reason": "No named lending partner (NBFC / bank) found in inspected sources", "points": 15}
+            )
 
-    if not ind.address_found:
-        score -= 5
-        deductions.append(
-            {"reason": "No registered business address found in inspected sources", "points": 5}
-        )
+        if not ind.address_found:
+            score -= 5
+            deductions.append(
+                {"reason": "No registered business address found in inspected sources", "points": 5}
+            )
 
-    if not ind.interest_rate_found:
-        score -= 10
-        deductions.append(
-            {"reason": "No interest-rate disclosure found in inspected sources", "points": 10}
-        )
+        if not ind.interest_rate_found:
+            score -= 10
+            deductions.append(
+                {"reason": "No interest-rate disclosure found in inspected sources", "points": 10}
+            )
+    else:
+        # Transparent note when public websites could not be inspected
+        pass
 
     # Complaint signals — mutually exclusive thresholds.
     if ind.complaint_count >= 8:

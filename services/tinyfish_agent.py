@@ -80,11 +80,12 @@ def _normalize(agent_result: dict | None, status: Any, error: Any) -> dict[str, 
         "evidence": "",
         "failure_reason": "",
     }
-    if isinstance(agent_result, dict):
+    completed = str(status) in ("RunStatus.COMPLETED", "COMPLETED", "completed")
+    if completed and isinstance(agent_result, dict):
         for k in base:
             if k in agent_result:
                 base[k] = agent_result[k]
-    if str(status) not in ("RunStatus.COMPLETED", "COMPLETED", "completed") and not isinstance(agent_result, dict):
+    if not completed:
         base["failure_reason"] = (
             f"Agent run did not complete (status={status}). "
             + (f"error={getattr(error, 'message', error)}" if error else "")
@@ -99,6 +100,7 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
     """Check the RBI directory for `name`. Never raises."""
     out: dict[str, Any] = {
         "ok": False,
+        "status": "failed",
         "checked": False,
         "found": False,
         "matched_name": "",
@@ -112,6 +114,7 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
     if not has_api_key():
         out["error"] = "TINYFISH_API_KEY not configured"
         out["failure_reason"] = "API key not configured"
+        out["status"] = "unavailable"
         return out
     try:
         from tinyfish import AsyncTinyFish  # type: ignore
@@ -120,6 +123,7 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover
         out["error"] = f"SDK init failed: {exc}"
         out["failure_reason"] = str(exc)
+        out["status"] = "failed"
         return out
 
     try:
@@ -129,11 +133,13 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
         )
     except asyncio.TimeoutError:
         out["error"] = f"Agent run timed out after {RUN_TIMEOUT_S}s"
-        out["failure_reason"] = out["error"]
+        out["failure_reason"] = "RBI directory lookup timed out. Verification was unsuccessful; this does NOT indicate absence."
+        out["status"] = "timed out"
         return out
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
         out["failure_reason"] = out["error"]
+        out["status"] = "failed"
         return out
 
     status = getattr(response, "status", None)
@@ -143,5 +149,6 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
     out["num_of_steps"] = getattr(response, "num_of_steps", None)
     normalized = _normalize(result if isinstance(result, dict) else None, status, error)
     out.update(normalized)
-    out["ok"] = True
+    out["ok"] = bool(out["checked"])
+    out["status"] = "completed" if out["checked"] else "unavailable"
     return out

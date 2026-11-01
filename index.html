@@ -60,10 +60,14 @@
   .st-running{background:#dbeafe;color:#1d4ed8}
   .st-completed{background:var(--soft-green);color:#15803d}
   .st-failed{background:var(--soft-red);color:#b91c1c}
+  .st-unavailable{background:#fef3c7;color:#92400e}
+  .st-timed_out{background:#ffedd5;color:#9a3412}
   .step .bar{position:absolute;left:0;bottom:0;height:3px;width:0;background:#3b82f6;transition:width .4s}
   .step.running .bar{width:70%;animation:pulse 1.2s infinite}
   .step.completed .bar{width:100%;background:var(--green)}
   .step.failed .bar{width:100%;background:var(--red)}
+  .step.unavailable .bar{width:100%;background:var(--amber)}
+  .step.timed_out .bar{width:100%;background:var(--amber)}
   @keyframes pulse{0%{width:20%}50%{width:80%}100%{width:30%}}
 
   .results{display:none;margin-top:30px}
@@ -110,6 +114,7 @@
   .no-shot{padding:40px;text-align:center;color:var(--muted);background:#f8fafc;border:1px dashed var(--border);border-radius:10px}
   .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
   .demo-banner{background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:13px;font-weight:600;padding:9px 14px;border-radius:8px;margin-bottom:14px;text-align:center}
+  .live-banner{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;font-size:13px;font-weight:700;padding:9px 14px;border-radius:8px;margin-bottom:14px;text-align:center;letter-spacing:.3px}
   .disclaimer{font-size:12px;color:var(--muted);background:#f8fafc;border:1px solid var(--border);border-radius:10px;padding:14px;margin-top:14px}
   .error-note{color:var(--red);font-size:13px;margin-top:6px}
   .mode-pill{font-size:11px;font-weight:700;padding:5px 12px;border-radius:999px;letter-spacing:.5px;text-transform:uppercase}
@@ -199,12 +204,22 @@ function renderTimeline(){
 function setStep(key, status, msg){
   const el = document.getElementById('step-'+key);
   if(!el) return;
-  el.classList.remove('running','completed','failed');
-  if(status) el.classList.add(status);
+  el.classList.remove('running','completed','failed','unavailable','timed_out');
+  const normalizedStatus = (status||'pending').toLowerCase().replace(/\s+/g,'_');
+  el.classList.add(normalizedStatus);
   const b = el.querySelector('.badge');
-  const label = {pending:'Pending',running:'Running',completed:'Completed',failed:'Failed'}[status]||status;
-  b.className = 'badge st-'+(status||'pending');
-  b.textContent = label.charAt(0).toUpperCase()+label.slice(1);
+  const labelMap = {
+    pending: 'Pending',
+    running: 'Running',
+    completed: 'Completed',
+    failed: 'Failed',
+    unavailable: 'Unavailable',
+    timed_out: 'Timed Out',
+    available: 'Available'
+  };
+  const label = labelMap[normalizedStatus] || (status ? status.toUpperCase() : 'PENDING');
+  b.className = 'badge st-'+normalizedStatus;
+  b.textContent = label;
   if(msg) el.querySelector('.exp').textContent = msg;
 }
 function resetSteps(){
@@ -244,7 +259,9 @@ function fmtList(arr, fn){return (arr||[]).map(fn).join('');}
 
 function renderResults(report){
   const r=report, d=r.demo;
-  const banner = d?'<div class="demo-banner">SAMPLE DATA — DEMONSTRATION MODE</div>':'';
+  const banner = d
+    ? '<div class="demo-banner">SAMPLE DATA — DEMONSTRATION MODE</div>'
+    : '<div class="live-banner">LIVE INVESTIGATION — REAL-TIME TINYFISH INTELLIGENCE</div>';
   const ind = r.indicators||{};
   const fetchInd = (r.fetch&&r.fetch.indicators)||{};
   const rbi = r.rbi||{};
@@ -257,8 +274,9 @@ function renderResults(report){
       <div class="chk"><span class="dot no">✕</span><div><b>Simulated RBI directory check</b><br><span class="src-link">This fictional demonstration scenario represents an application not listed in the sample directory data. No live RBI verification was performed.</span></div></div>
       <p style="margin-top:8px;font-size:12px;color:var(--muted)">Simulated sample scoring deduction: 40 points applied to demonstrate high-risk scoring logic.</p>`;
   } else if(!rbi.checked){
+    const rbiStatusLabel = rbi.status === 'timed out' ? 'TIMED OUT' : 'DIRECTORY CHECK UNAVAILABLE';
     rbiHtml = `
-      <div style="margin-bottom:8px"><span class="badge" style="background:#fef3c7;color:#92400e;font-weight:700">DIRECTORY CHECK UNAVAILABLE</span></div>
+      <div style="margin-bottom:8px"><span class="badge" style="background:#fef3c7;color:#92400e;font-weight:700">${rbiStatusLabel}</span></div>
       <div class="chk"><span class="dot no">!</span><div><b>RBI directory lookup</b><br><span class="src-link">Could not be checked. ${esc(rbi.failure_reason||rbi.error||'Directory lookup did not complete or was unreachable.')}</span></div></div>
       <p style="margin-top:8px;font-size:12px;color:var(--muted)">Safety rule: A failed lookup is NOT treated as absence. A 15-point uncertainty deduction is applied instead of 40.</p>`;
   } else if(rbi.found){
@@ -294,11 +312,19 @@ function renderResults(report){
 
   const br = r.browser||{};
   const shotHtml = br.ok && br.screenshot_url
-    ? `<img class="screenshot" src="${esc(br.screenshot_url)}" alt="Evidence screenshot" onerror="this.parentNode.innerHTML='<div class=\\'no-shot\\'>Screenshot unavailable.</div>'" />`
-    : `<div class="no-shot">No screenshot captured. ${esc(br.error||'')}</div>`;
+    ? `<img class="screenshot" src="${esc(br.screenshot_url)}" alt="Visual evidence screenshot" onerror="this.parentNode.innerHTML='<div class=\\'no-shot\\'>Screenshot unavailable.</div>'" />`
+    : `<div class="no-shot">${d ? 'No screenshot captured.' : 'Visual evidence capture unavailable: '}${esc(br.error||'Capture could not complete.')}</div>`;
 
   const rs = r.research||{};
-  const reportHtml = rs.report?`<div class="report">${esc(rs.report)}</div>`:`<div class="no-shot">Research ${esc(rs.status||'unavailable')}. ${esc(rs.error||'')}</div>`;
+  let reportHtml;
+  if(rs.report){
+    reportHtml = `<div class="report">${esc(rs.report)}</div>`;
+  } else {
+    reportHtml = `<div class="no-shot" style="text-align:left;line-height:1.6">
+      <b style="color:var(--navy)">Research pending or unavailable.</b> Preliminary evidence summary is based on completed Search and Fetch results.
+      <p style="margin-top:8px;font-size:12px;color:var(--muted)">${esc(rs.error || 'Deep research runs asynchronously and does not block the report.')}</p>
+    </div>`;
+  }
   const cites = fmtList(rs.citations||[], c=>`<li class="src-link" style="margin-bottom:6px">${renderSourceLink(c)}</li>`);
 
   const mon = r.monitor||{};
@@ -326,7 +352,9 @@ function renderResults(report){
           <div class="section-title" style="margin:0">Verdict</div>
           <span class="verdict ${verdictClass(score.verdict)}">${esc(score.verdict)}</span>
           <p style="margin-top:12px;color:var(--muted);font-size:13px">Preliminary assessment from public signals. Not an official RBI rating.</p>
-          ${d?'<span class="demo-score-note">Fictional demonstration assessment. No real lender has been assessed.</span>':''}
+          ${d
+            ? '<span class="demo-score-note">Fictional demonstration assessment. No real lender has been assessed.</span>'
+            : '<span style="display:inline-block;margin-top:10px;font-size:12px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;padding:6px 10px;border-radius:8px;font-weight:600">LIVE INVESTIGATION GROUND TRUTH</span>'}
         </div>
       </div>
       <div class="card">
@@ -390,7 +418,7 @@ function handleEvent(data){
     document.getElementById('results').innerHTML=`<div class="card error-note">${esc(data.message||'Investigation error.')}</div>`;
     document.getElementById('results').classList.add('show'); return; }
   if(step==='final'){ renderResults(data.report); return; }
-  if(step==='monitor'){ setStep('monitor', data.status==='available'?'completed':(data.status||'pending'), data.message); return; }
+  if(step==='monitor'){ setStep('monitor', data.status||'pending', data.message); return; }
   if(STEP_MAP[step]){
     const st = data.status;
     if(st==='started'){ setStep(step,'running', data.message); }
@@ -402,11 +430,11 @@ function handleEvent(data){
 }
 function setModeTag(demo){
   const el = document.getElementById('mode-tag');
-  if(el) el.textContent = demo ? ' · DEMO MODE' : ' · LIVE MODE';
+  if(el) el.textContent = demo ? ' · DEMO MODE' : ' · LIVE INVESTIGATION';
   const badge = document.getElementById('mode-badge');
   if(badge){
     badge.className = 'mode-pill ' + (demo ? 'mode-demo' : 'mode-live');
-    badge.textContent = demo ? 'DEMO MODE (Sample Data)' : 'LIVE MODE (TinyFish API)';
+    badge.textContent = demo ? 'DEMO MODE (Sample Data)' : 'LIVE INVESTIGATION (TinyFish)';
   }
   const nameInput = document.getElementById('name');
   if (nameInput && !nameInput.value) {

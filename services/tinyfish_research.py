@@ -41,7 +41,7 @@ async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
     }
     if not has_api_key():
         out["error"] = "TINYFISH_API_KEY not configured"
-        out["status"] = "skipped"
+        out["status"] = "unavailable"
         return out
     try:
         from tinyfish import AsyncTinyFish  # type: ignore
@@ -58,12 +58,14 @@ async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
             timeout=RESEARCH_BUDGET_S,
         )
     except asyncio.TimeoutError:
-        out["status"] = "running"
-        out["error"] = f"Research still running (budget {RESEARCH_BUDGET_S}s exceeded; deep mode takes 5-20 min)"
+        out["status"] = "pending"
+        out["error"] = f"Research pending (budget {RESEARCH_BUDGET_S}s reached; TinyFish deep mode takes 5-20 min in background)"
+        out["notice"] = "Research pending or unavailable. Preliminary evidence summary is based on completed Search and Fetch results."
         return out
     except Exception as exc:
-        out["status"] = "failed"
+        out["status"] = "unavailable"
         out["error"] = f"{type(exc).__name__}: {exc}"
+        out["notice"] = "Research pending or unavailable. Preliminary evidence summary is based on completed Search and Fetch results."
         return out
 
     status = str(getattr(response, "status", "")).upper()
@@ -77,6 +79,6 @@ async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
         out["status"] = "completed"
         out["ok"] = True
     else:
-        out["status"] = "completed_no_result"
+        out["status"] = "unavailable"
         out["error"] = "Research completed but returned no report (status={})".format(status)
     return out

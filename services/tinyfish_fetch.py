@@ -53,6 +53,18 @@ INTEREST_SIGNALS = [
     "% per month",
     "processing fee",
 ]
+TERMS_SIGNALS = [
+    "terms and conditions",
+    "terms of service",
+    "terms of use",
+    "user agreement",
+]
+POLICY_SIGNALS = [
+    "privacy policy",
+    "recovery policy",
+    "fair practice code",
+    "code of conduct",
+]
 CONTACT_RE = re.compile(r"(\+?\d[\d\s\-]{8,}\d|[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})")
 PIN_RE = re.compile(r"\b\d{6}\b")
 
@@ -76,6 +88,17 @@ def _count_keywords(text: str) -> dict[str, int]:
     return counts
 
 
+def _snippet_around(text: str, signal: str, max_chars: int = 140) -> str:
+    """Extract a short context snippet around a detected signal."""
+    pos = text.lower().find(signal.lower())
+    if pos == -1:
+        return ""
+    start = max(0, pos - 40)
+    end = min(len(text), pos + len(signal) + 80)
+    snip = text[start:end].strip().replace("\n", " ")
+    return f"...{snip}..." if start > 0 else f"{snip}..."
+
+
 def _parse_result(item: Any) -> dict[str, Any]:
     text = getattr(item, "text", "") or ""
     return {
@@ -86,6 +109,7 @@ def _parse_result(item: Any) -> dict[str, Any]:
         "text": text,
         "text_len": len(text),
         "links": list(getattr(item, "links", None) or []),
+        "success": True,
     }
 
 
@@ -94,6 +118,7 @@ def _parse_error(item: Any) -> dict[str, Any]:
         "url": getattr(item, "url", None),
         "error": getattr(item, "error", None),
         "status": getattr(item, "status", None),
+        "success": False,
     }
 
 
@@ -104,23 +129,65 @@ def extract_indicators(fetched: list[dict[str, Any]]) -> dict[str, Any]:
     address = False
     interest_rate = False
     contact = False
+    terms_conditions = False
+    privacy_policy = False
+
+    evidence_map: dict[str, dict[str, str]] = {}
     total_complaint = 0
     per_keyword: dict[str, int] = {kw: 0 for kw in COMPLAINT_KEYWORDS}
     complaint_sources: list[dict[str, Any]] = []
 
     for r in fetched:
         text = r.get("text", "") or ""
-        url = r.get("final_url") or r.get("url")
-        if _has_any(text, GRIEVANCE_SIGNALS):
+        url = r.get("final_url") or r.get("url") or ""
+
+        if not grievance and _has_any(text, GRIEVANCE_SIGNALS):
             grievance = True
-        if _has_any(text, LENDING_PARTNER_SIGNALS):
+            for s in GRIEVANCE_SIGNALS:
+                if s in text.lower():
+                    evidence_map["grievance"] = {"source_url": url, "snippet": _snippet_around(text, s)}
+                    break
+
+        if not lending_partner and _has_any(text, LENDING_PARTNER_SIGNALS):
             lending_partner = True
-        if _has_any(text, ADDRESS_SIGNALS) or bool(PIN_RE.search(text)):
+            for s in LENDING_PARTNER_SIGNALS:
+                if s in text.lower():
+                    evidence_map["lending_partner"] = {"source_url": url, "snippet": _snippet_around(text, s)}
+                    break
+
+        if not address and (_has_any(text, ADDRESS_SIGNALS) or bool(PIN_RE.search(text))):
             address = True
-        if _has_any(text, INTEREST_SIGNALS):
+            for s in ADDRESS_SIGNALS:
+                if s in text.lower():
+                    evidence_map["address"] = {"source_url": url, "snippet": _snippet_around(text, s)}
+                    break
+
+        if not interest_rate and _has_any(text, INTEREST_SIGNALS):
             interest_rate = True
-        if CONTACT_RE.search(text):
+            for s in INTEREST_SIGNALS:
+                if s in text.lower():
+                    evidence_map["interest_rate"] = {"source_url": url, "snippet": _snippet_around(text, s)}
+                    break
+
+        if not contact and CONTACT_RE.search(text):
             contact = True
+            m = CONTACT_RE.search(text)
+            if m:
+                evidence_map["contact"] = {"source_url": url, "snippet": m.group(0)}
+
+        if not terms_conditions and _has_any(text, TERMS_SIGNALS):
+            terms_conditions = True
+            for s in TERMS_SIGNALS:
+                if s in text.lower():
+                    evidence_map["terms"] = {"source_url": url, "snippet": _snippet_around(text, s)}
+                    break
+
+        if not privacy_policy and _has_any(text, POLICY_SIGNALS):
+            privacy_policy = True
+            for s in POLICY_SIGNALS:
+                if s in text.lower():
+                    evidence_map["privacy"] = {"source_url": url, "snippet": _snippet_around(text, s)}
+                    break
 
         counts = _count_keywords(text)
         page_total = sum(counts.values())
@@ -137,6 +204,9 @@ def extract_indicators(fetched: list[dict[str, Any]]) -> dict[str, Any]:
         "address_found": address,
         "interest_rate_found": interest_rate,
         "contact_found": contact,
+        "terms_found": terms_conditions,
+        "privacy_found": privacy_policy,
+        "evidence_details": evidence_map,
         "complaint_count": total_complaint,
         "complaint_keywords": per_keyword,
         "complaint_sources": complaint_sources,
@@ -147,6 +217,7 @@ async def fetch_pages(urls: list[str], purpose: str | None = None) -> dict[str, 
     """Fetch up to 10 URLs. Never raises — returns a status dict."""
     out: dict[str, Any] = {
         "ok": False,
+        "status": "unavailable",
         "results": [],
         "errors": [],
         "indicators": {},
@@ -181,6 +252,7 @@ async def fetch_pages(urls: list[str], purpose: str | None = None) -> dict[str, 
     out["errors"] = [_parse_error(e) for e in (getattr(resp, "errors", None) or [])]
     out["indicators"] = extract_indicators(out["results"])
     out["ok"] = bool(out["results"])
+    out["status"] = "completed" if out["ok"] else "failed"
     if not out["ok"] and out["error"] is None:
         out["error"] = "All URLs failed to fetch"
     return out
