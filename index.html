@@ -361,6 +361,7 @@ function renderResults(report){
         <div>
           <div class="section-title" style="margin:0">Verdict</div>
           <span class="verdict ${verdictClass(score.verdict)}">${esc(score.verdict)}</span>
+          <p style="margin-top:8px;color:var(--muted);font-size:13px">Verification confidence: <b>${esc(score.confidence||'limited').toUpperCase()}</b></p>
           <p style="margin-top:12px;color:var(--muted);font-size:13px">Preliminary assessment from public signals. Not an official RBI rating.</p>
           ${d
             ? '<span class="demo-score-note">Fictional demonstration assessment. No real lender has been assessed.</span>'
@@ -416,6 +417,7 @@ function renderResults(report){
       <button class="btn btn-ghost" onclick="anotherApp()">Check another app</button>
     </div>
     <div class="disclaimer">${esc(r.disclaimer||'')}</div>
+    ${r.unverified_findings&&r.unverified_findings.length?`<div class="disclaimer"><b>Unverified checks and limitations</b><ul style="margin:8px 0 0 18px">${r.unverified_findings.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:''}
   `;
   document.getElementById('results').classList.add('show');
   window.__lastReport = r;

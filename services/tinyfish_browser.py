@@ -88,6 +88,8 @@ async def capture_screenshot(url: str, app_name: str = "app") -> dict[str, Any]:
                         fname = f"{safe}_{int(time.time())}.png"
                         path = os.path.join(EVIDENCE_DIR, fname)
                         await page.screenshot(path=path, full_page=False)
+                        if not os.path.isfile(path):
+                            raise RuntimeError("Screenshot capture returned without a saved evidence file")
                         out["screenshot_path"] = path
                         out["screenshot_url"] = f"/static/evidence/{fname}"
                         out["ok"] = True

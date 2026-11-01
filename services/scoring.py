@@ -115,14 +115,27 @@ def compute_score(ind: Indicators) -> dict[str, Any]:
 
     score = max(0, min(100, score))
 
-    if score >= 70:
+    if score >= 70 and ind.rbi_checked:
         verdict = VERDICT_LOW
     elif score >= 45:
         verdict = VERDICT_UNCLEAR
     else:
         verdict = VERDICT_HIGH
 
-    return {"score": score, "verdict": verdict, "deductions": deductions}
+    unverified: list[str] = []
+    if not ind.rbi_checked:
+        unverified.append("RBI directory verification was not completed")
+    if not ind.fetch_checked:
+        unverified.append("Public website inspection was not completed")
+
+    confidence = "high" if ind.rbi_checked and ind.fetch_checked else "limited"
+    return {
+        "score": score,
+        "verdict": verdict,
+        "confidence": confidence,
+        "unverified": unverified,
+        "deductions": deductions,
+    }
 
 
 def verdict_color(verdict: str) -> str:

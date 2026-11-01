@@ -48,6 +48,8 @@ def test_rbi_unavailable_deducts_15_not_40():
     # only the 15 'could not be checked' deduction, never the 40
     assert any(d["points"] == 15 for d in res["deductions"])
     assert not any(d["points"] == 40 for d in res["deductions"])
+    assert res["verdict"] == VERDICT_UNCLEAR
+    assert res["confidence"] == "limited"
 
 
 def test_rbi_unavailable_found_stays_false_guard():
@@ -104,10 +106,10 @@ def test_verdict_bands():
               interest_rate_found=True, complaint_count=0)
     assert r["score"] == 100 and r["verdict"] == VERDICT_LOW
 
-    # 70 (LOWER boundary): rbi not checked(-15) + no interest(-10) + no address(-5), rest found
+    # 70 remains UNCLEAR when RBI verification is incomplete.
     r = score(rbi_checked=False, grievance_found=True, lending_partner_found=True,
               address_found=False, interest_rate_found=False, complaint_count=0)
-    assert r["score"] == 70 and r["verdict"] == VERDICT_LOW
+    assert r["score"] == 70 and r["verdict"] == VERDICT_UNCLEAR
 
     # 60 -> UNCLEAR: not found in RBI(-40), all transparency found
     r = score(rbi_checked=True, rbi_found=False, grievance_found=True,

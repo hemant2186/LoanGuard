@@ -49,6 +49,7 @@ DISCLAIMER = (
     "is based on information submitted by regulated entities and is not independently validated by "
     "RBI. Always verify directly with the regulated lender before borrowing."
 )
+PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "https://loanguard-sqcb.onrender.com").rstrip("/")
 
 app = FastAPI(title="LoanGuard", version="1.0.0")
 app.add_middleware(
@@ -130,6 +131,21 @@ def _build_report(name: str, site: str | None, demo: bool, search: dict, rbi: di
         "research": research.get("status", "completed" if research.get("ok") else "unavailable"),
         "monitor": "not_started",
     }
+    verified = []
+    if rbi.get("checked") and rbi.get("found"):
+        verified.append("The RBI directory returned a matching application entry.")
+    if fetch.get("ok"):
+        verified.append(f"{len(fetch.get('results', []))} public page(s) were successfully inspected.")
+    if browser.get("ok") and browser.get("screenshot_url"):
+        verified.append("A visual screenshot was captured and saved as evidence.")
+    limitations = list(score.get("unverified", []))
+    if not rbi.get("checked"):
+        limitations.append(rbi.get("failure_reason") or "RBI directory verification was unavailable.")
+    if not fetch.get("ok"):
+        limitations.append(fetch.get("error") or "Public website inspection was unavailable.")
+    if research.get("status") != "completed":
+        limitations.append(research.get("notice") or research.get("error") or "Research did not complete.")
+
     return {
         "app_name": name,
         "site": site or "",
@@ -141,6 +157,9 @@ def _build_report(name: str, site: str | None, demo: bool, search: dict, rbi: di
         "browser": browser,
         "research": research,
         "service_statuses": statuses,
+        "verified_findings": verified,
+        "unverified_findings": limitations,
+        "limitations": limitations,
         "indicators": {
             "rbi_checked": bool(rbi.get("checked", False)),
             "rbi_found": bool(rbi.get("found", False)),
@@ -248,6 +267,24 @@ async def investigate_stream(name: str, site: str | None) -> AsyncGenerator[str,
         browser = await capture_screenshot(shot_url, name)
     else:
         browser = {"ok": False, "status": "failed", "error": "No website URL available for visual evidence capture"}
+    if browser.get("ok"):
+        screenshot_url = browser.get("screenshot_url")
+        screenshot_path = browser.get("screenshot_path")
+        if not screenshot_url or not screenshot_path or not os.path.isfile(screenshot_path):
+            browser = {
+                **browser,
+                "ok": False,
+                "status": "failed",
+                "screenshot_url": None,
+                "error": "Screenshot was not persisted as accessible evidence",
+            }
+        elif screenshot_url.startswith("/"):
+            browser = {**browser, "screenshot_url": f"{PUBLIC_BACKEND_URL}{screenshot_url}"}
+    browser = {
+        key: value
+        for key, value in browser.items()
+        if key not in {"session_id", "cdp_url", "screenshot_path"}
+    }
     browser_status = browser.get("status", "completed" if browser.get("ok") else "failed")
     browser_msg = (
         "Visual evidence captured."

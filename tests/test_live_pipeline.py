@@ -193,6 +193,21 @@ def test_agent_timeout_does_not_become_confirmed_absence():
     assert res["score"] == 85  # 100 - 15 (lookup unavailable), NOT -40
     assert not any(d["points"] == 40 for d in res["deductions"])
     assert any(d["points"] == 15 for d in res["deductions"])
+    assert res["verdict"] == "UNCLEAR"
+
+
+def test_confirmed_rbi_presence_can_support_lower_risk():
+    result = compute_score(Indicators(
+        rbi_checked=True,
+        rbi_found=True,
+        fetch_checked=True,
+        grievance_found=True,
+        lending_partner_found=True,
+        address_found=True,
+        interest_rate_found=True,
+    ))
+    assert result["verdict"] == "LOWER RISK"
+    assert result["confidence"] == "high"
 
 
 # 6. Missing fields are only scored when actually inspected
@@ -303,7 +318,7 @@ async def test_monitor_creation_only_on_watch_endpoint(monkeypatch, client):
 
 # 10. JSON reports contain the actual investigation results
 @pytest.mark.asyncio
-async def test_json_report_contains_actual_results(monkeypatch):
+async def test_json_report_contains_actual_results(monkeypatch, tmp_path):
     monkeypatch.setenv("DEMO_MODE", "0")
     monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
 
@@ -315,7 +330,14 @@ async def test_json_report_contains_actual_results(monkeypatch):
     }
     mock_rbi = {"ok": True, "checked": True, "found": False, "failure_reason": ""}
     mock_fetch = {"ok": True, "results": [{"url": "https://real.lender.in"}], "indicators": {"complaint_count": 0}}
-    mock_browser = {"ok": True, "screenshot_url": "/static/evidence/live_screen.png"}
+    screenshot_path = tmp_path / "live_screen.png"
+    with open(screenshot_path, "wb") as screenshot_file:
+        screenshot_file.write(b"test screenshot")
+    mock_browser = {
+        "ok": True,
+        "screenshot_url": "/static/evidence/live_screen.png",
+        "screenshot_path": str(screenshot_path),
+    }
     mock_research = {"ok": True, "report": "Live research report", "citations": [{"title": "Source 1", "url": "https://real.lender.in/terms"}]}
 
     with patch("main.search_loan_app", AsyncMock(return_value=mock_search)), \
@@ -334,5 +356,7 @@ async def test_json_report_contains_actual_results(monkeypatch):
         assert final_rep["site"] == "https://real.lender.in"
         assert final_rep["demo"] is False
         assert final_rep["search"]["results"][0]["url"] == "https://real.lender.in"
-        assert final_rep["browser"]["screenshot_url"] == "/static/evidence/live_screen.png"
+        assert final_rep["browser"]["screenshot_url"] == (
+            "https://loanguard-sqcb.onrender.com/static/evidence/live_screen.png"
+        )
         assert len(final_rep["research"]["citations"]) == 1
