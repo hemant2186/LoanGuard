@@ -190,6 +190,14 @@ const STEPS = [
 const STEP_MAP = Object.fromEntries(STEPS.map(s=>[s.key,s]));
 let es = null;
 let collected = {demo:false};
+let receivedTerminalEvent = false;
+const API_BASE_URL = (() => {
+  const configured = 'https://loanguard-sqcb.onrender.com';
+  return ['localhost', '127.0.0.1'].includes(window.location.hostname) ? '' : configured;
+})();
+function apiUrl(path){
+  return `${API_BASE_URL}${path}`;
+}
 
 function renderTimeline(){
   document.getElementById('timeline').innerHTML = STEPS.map(s=>`
@@ -215,7 +223,8 @@ function setStep(key, status, msg){
     failed: 'Failed',
     unavailable: 'Unavailable',
     timed_out: 'Timed Out',
-    available: 'Available'
+    available: 'Available',
+    not_started: 'Not Started'
   };
   const label = labelMap[normalizedStatus] || (status ? status.toUpperCase() : 'PENDING');
   b.className = 'badge st-'+normalizedStatus;
@@ -224,6 +233,7 @@ function setStep(key, status, msg){
 }
 function resetSteps(){
   collected = {demo:false};
+  receivedTerminalEvent = false;
   STEPS.forEach(s=>setStep(s.key,'pending',STEP_MAP[s.key].exp));
   document.getElementById('results').classList.remove('show');
 }
@@ -417,8 +427,12 @@ function handleEvent(data){
   if(step==='error'){ setStep('search','failed'); document.getElementById('results').classList.remove('show');
     document.getElementById('results').innerHTML=`<div class="card error-note">${esc(data.message||'Investigation error.')}</div>`;
     document.getElementById('results').classList.add('show'); return; }
-  if(step==='final'){ renderResults(data.report); return; }
-  if(step==='monitor'){ setStep('monitor', data.status||'pending', data.message); return; }
+  if(step==='final'){
+    receivedTerminalEvent = data.status === 'completed';
+    if(data.report) renderResults(data.report);
+    return;
+  }
+  if(step==='monitor'){ setStep('monitor', data.status||'not_started', data.message); return; }
   if(STEP_MAP[step]){
     const st = data.status;
     if(st==='started'){ setStep(step,'running', data.message); }
@@ -449,7 +463,7 @@ function investigate(){
   resetSteps();
   const btn=document.getElementById('investigate');
   btn.disabled=true; btn.textContent='INVESTIGATING…';
-  const url=`/api/investigate?name=${encodeURIComponent(name)}&site=${encodeURIComponent(site)}`;
+  const url=apiUrl(`/api/investigate?name=${encodeURIComponent(name)}&site=${encodeURIComponent(site)}`);
   es=new EventSource(url);
   es.onmessage=e=>{
     try{
@@ -465,8 +479,8 @@ function investigate(){
     es.close();
     btn.disabled=false;
     btn.textContent='INVESTIGATE';
-    if(!document.getElementById('results').classList.contains('show')){
-      document.getElementById('results').innerHTML=`<div class="card error-note">Connection closed or ended. ${es.readyState===2?'Investigation completed.':'Retry the investigation.'}</div>`;
+    if(!receivedTerminalEvent){
+      document.getElementById('results').innerHTML=`<div class="card error-note">Investigation stream ended before a final result was received. The backend may be unavailable, still waking up, or the connection may have been interrupted. Please retry.</div>`;
       document.getElementById('results').classList.add('show');
     }
   };
@@ -492,7 +506,7 @@ async function doMonitor(){
   const st=document.getElementById('mon-status');
   st.innerHTML='<span style="color:#3b82f6;font-size:13px">Creating monitor…</span>';
   try{
-    const res=await fetch('/api/watch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    const res=await fetch(apiUrl('/api/watch'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     const d=await res.json();
     if(d.demo) {
       st.innerHTML='<span class="badge" style="background:#fef3c7;color:#92400e">SIMULATED MONITOR — SAMPLE DATA</span> <span style="font-size:13px;color:#64748b;margin-left:6px">Monitoring the RBI directory (simulated).</span>';
@@ -509,7 +523,13 @@ async function doMonitor(){
 document.getElementById('investigate').addEventListener('click',investigate);
 document.getElementById('name').addEventListener('keydown',e=>{if(e.key==='Enter')investigate();});
 renderTimeline();
-fetch('/api/health').then(r=>r.json()).then(h=>setModeTag(h.demo_mode)).catch(()=>{});
+fetch(apiUrl('/api/health')).then(r=>{
+  if(!r.ok) throw new Error(`Backend health returned ${r.status}`);
+  return r.json();
+}).then(h=>setModeTag(h.demo_mode)).catch(()=>{
+  const badge = document.getElementById('mode-badge');
+  if(badge) badge.textContent = 'BACKEND UNAVAILABLE';
+});
 </script>
 </body>
 </html>

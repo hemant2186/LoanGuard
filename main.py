@@ -21,6 +21,7 @@ import os
 from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -50,6 +51,17 @@ DISCLAIMER = (
 )
 
 app = FastAPI(title="LoanGuard", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://loanguard-five.vercel.app",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "Cache-Control"],
+)
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=os.path.join(PROJECT_ROOT, "static")), name="static")
 
@@ -58,7 +70,13 @@ app.mount("/static", StaticFiles(directory=os.path.join(PROJECT_ROOT, "static"))
 # Helpers
 # --------------------------------------------------------------------------- #
 def _sse(event: str, payload: dict[str, Any]) -> str:
-    payload = {"step": event, **payload}
+    service_events = {"search", "agent", "fetch", "browser", "research", "monitor"}
+    payload = {
+        "type": "service_status" if event in service_events else "investigation",
+        "step": event,
+        **({"service": event} if event in service_events else {}),
+        **payload,
+    }
     return f"data: {json.dumps(payload, default=str)}\n\n"
 
 
@@ -104,6 +122,14 @@ def _collect_fetch_urls(site: str | None, search: dict) -> list[str]:
 
 def _build_report(name: str, site: str | None, demo: bool, search: dict, rbi: dict,
                   fetch: dict, browser: dict, research: dict, score: dict) -> dict[str, Any]:
+    statuses = {
+        "search": search.get("status", "completed" if search.get("ok") else "failed"),
+        "agent": rbi.get("status", "completed" if rbi.get("checked") else "unavailable"),
+        "fetch": fetch.get("status", "completed" if fetch.get("ok") else "failed"),
+        "browser": browser.get("status", "completed" if browser.get("ok") else "failed"),
+        "research": research.get("status", "completed" if research.get("ok") else "unavailable"),
+        "monitor": "not_started",
+    }
     return {
         "app_name": name,
         "site": site or "",
@@ -114,6 +140,7 @@ def _build_report(name: str, site: str | None, demo: bool, search: dict, rbi: di
         "fetch": fetch,
         "browser": browser,
         "research": research,
+        "service_statuses": statuses,
         "indicators": {
             "rbi_checked": bool(rbi.get("checked", False)),
             "rbi_found": bool(rbi.get("found", False)),
@@ -156,7 +183,7 @@ async def investigate_stream(name: str, site: str | None) -> AsyncGenerator[str,
                                "data": sample["browser"], "demo": True})
         yield _sse("research", {"status": "completed", "message": "Cited findings prepared (sample).",
                                 "data": sample["research"], "demo": True})
-        yield _sse("monitor", {"status": "pending",
+        yield _sse("monitor", {"status": "not_started",
                                "message": "Monitor is not created until you click Monitor RBI directory.", "demo": True})
         yield _sse("scoring", {"status": "completed", "message": "Risk score computed (sample).",
                                "data": sample["score"], "demo": True})
@@ -242,7 +269,7 @@ async def investigate_stream(name: str, site: str | None) -> AsyncGenerator[str,
     yield _sse("research", {"status": research_status, "message": research_msg, "data": research})
 
     # 6. MONITOR — Real Monitor Stage (On-demand)
-    yield _sse("monitor", {"status": "pending",
+    yield _sse("monitor", {"status": "not_started",
                            "message": "Monitor is not created until you click Monitor RBI directory."})
 
     # SCORING — Evidence-Based Risk Engine

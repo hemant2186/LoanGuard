@@ -53,6 +53,20 @@ def test_demo_mode_uses_sample_fixtures(monkeypatch):
     assert "SIMULATED RBI RESULT" in rep["rbi"]["status"]
 
 
+def test_service_events_have_shared_status_contract(monkeypatch):
+    monkeypatch.setenv("DEMO_MODE", "1")
+    response = TestClient(app).get("/api/investigate?name=SampleLoan+Demo")
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    service_event = next(event for event in events if event["step"] == "search")
+    assert service_event["type"] == "service_status"
+    assert service_event["service"] == "search"
+    assert service_event["status"] == "completed"
+
+
 # 2. DEMO_MODE=0 never loads sample fixtures
 @pytest.mark.asyncio
 async def test_live_mode_never_loads_sample_fixtures(monkeypatch):
@@ -109,6 +123,7 @@ async def test_live_mode_never_loads_sample_fixtures(monkeypatch):
         assert rep["demo"] is False
         assert rep["app_name"] == "KreditBee"
         assert rep["site"] == "https://www.kreditbee.in"
+        assert rep["service_statuses"]["monitor"] == "not_started"
         assert rep["rbi"]["found"] is True
         assert rep["score"]["score"] == 100
 

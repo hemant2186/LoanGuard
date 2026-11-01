@@ -40,6 +40,15 @@ def test_health_endpoint(client):
     assert "sk-" not in json.dumps(data)
 
 
+def test_production_cors_allows_vercel_frontend(client):
+    response = client.get(
+        "/api/health",
+        headers={"Origin": "https://loanguard-five.vercel.app"},
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://loanguard-five.vercel.app"
+
+
 def test_investigate_empty_name(client):
     response = client.get("/api/investigate?name=")
     assert response.status_code == 400
