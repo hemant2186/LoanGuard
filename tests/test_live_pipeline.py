@@ -350,6 +350,75 @@ async def test_agent_queue_and_result_retrieval(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_completed_agent_check_not_found_is_completed_not_unavailable(monkeypatch):
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+
+    class FakeRuns:
+        async def get(self, run_id):
+            return type("Run", (), {
+                "status": "COMPLETED",
+                "result": {
+                    "checked": True, "found": False, "matched_name": "",
+                    "lending_entity": "", "evidence": "searched directory",
+                    "failure_reason": "",
+                },
+                "error": None,
+            })()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.runs = FakeRuns()
+
+    with patch("tinyfish.AsyncTinyFish", FakeClient):
+        result = await get_rbi_directory_status("agent-not-found")
+    assert result["status"] == "completed"
+    assert result["checked"] is True
+    assert result["found"] is False
+
+
+def test_mpokket_conflicting_sources_reconcile_without_merging_findings():
+    from main import _build_report
+
+    fetch = {
+        "ok": True,
+        "indicators": {
+            "grievance_found": True,
+            "lending_partner_found": False,
+            "address_found": True,
+            "interest_rate_found": True,
+            "evidence_details": {},
+            "complaint_count": 0,
+        },
+    }
+    rbi = {
+        "status": "completed", "checked": True, "found": False,
+        "evidence": "mPokket was not present after the directory search",
+    }
+    research = {
+        "status": "completed",
+        "report": "Research identifies mPokket Financial Services Private Limited.",
+        "citations": [{"title": "Research source", "url": "https://research.example/source"}],
+    }
+    score = compute_score(_build_indicators(rbi, fetch))
+    report = _build_report("mPokket", "https://mpokket.in", False, {}, rbi, fetch, {}, research, score)
+    assert report["score"]["score"] == 45
+    assert report["score"]["verdict"] == "UNCLEAR"
+    assert report["score"]["confidence"] == "high"
+    assert report["indicators"]["lending_partner_found"] is False
+    assert report["evidence_provenance"]["website_transparency"]["lending_partner_found"] is False
+    assert report["evidence_provenance"]["research"]["citations"]
+
+
+def test_frontend_reconciles_late_agent_result_before_rendering_score():
+    index_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "index.html")
+    with open(index_path, encoding="utf-8") as file:
+        source = file.read()
+    assert "reconcileReportScore(window.__lastReport);" in source
+    assert "window.__lastReport.indicators.rbi_checked = Boolean(data.checked);" in source
+    assert "Website sources: named lending partner (NBFC/bank)" in source
+
+
+@pytest.mark.asyncio
 async def test_agent_timeout_and_access_denied_are_not_absence(monkeypatch):
     monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
 

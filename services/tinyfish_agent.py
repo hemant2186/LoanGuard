@@ -186,9 +186,15 @@ async def get_rbi_directory_status(run_id: str) -> dict[str, Any]:
     error = getattr(response, "error", None)
     error_text = getattr(error, "message", error)
     if raw_status == "COMPLETED":
-        out.update(_normalize(getattr(response, "result", None), raw_status, error))
-        out["ok"] = bool(out["checked"])
-        out["status"] = "completed" if out["checked"] else "unavailable"
+        result = getattr(response, "result", None)
+        if isinstance(result, dict):
+            out.update(_normalize(result, raw_status, error))
+            out["ok"] = bool(out["checked"])
+            out["status"] = "completed"
+        else:
+            out["status"] = "unavailable"
+            out["error"] = error_text or "Agent completed without a structured result"
+            out["failure_reason"] = str(out["error"])
     elif raw_status in {"PENDING", "RUNNING"}:
         out["status"] = raw_status.lower()
     elif raw_status in {"TIMED_OUT", "TIMEOUT"} or getattr(error, "code", "") in {"TIMEOUT", "TIMED_OUT"}:

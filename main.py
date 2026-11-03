@@ -176,6 +176,24 @@ def _build_report(name: str, site: str | None, demo: bool, search: dict, rbi: di
             "complaint_count": int(fetch.get("indicators", {}).get("complaint_count", 0) or 0),
         },
         "disclaimer": DISCLAIMER,
+        "evidence_provenance": {
+            "rbi_directory": {
+                "source": "TinyFish Agent using the RBI public directory",
+                "status": rbi.get("status"),
+                "checked": bool(rbi.get("checked")),
+                "found": bool(rbi.get("found")),
+                "evidence": rbi.get("evidence", ""),
+            },
+            "website_transparency": {
+                "source": "TinyFish Fetch inspected website/search URLs",
+                "lending_partner_found": bool(fetch.get("indicators", {}).get("lending_partner_found", False)),
+                "evidence": fetch.get("indicators", {}).get("evidence_details", {}).get("lending_partner", {}),
+            },
+            "research": {
+                "source": "TinyFish Research report and its citations",
+                "citations": research.get("citations", []),
+            },
+        },
     }
 
 

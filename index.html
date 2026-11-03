@@ -282,6 +282,7 @@ function renderResults(report){
   const ind = r.indicators||{};
   const fetchInd = (r.fetch&&r.fetch.indicators)||{};
   const rbi = r.rbi||{};
+  const rs = r.research||{};
   const score = r.score||{score:0,verdict:'UNCLEAR',deductions:[]};
 
   let rbiHtml;
@@ -310,13 +311,16 @@ function renderResults(report){
   }
 
   const chk = (label, found) => `<div class="chk"><span class="dot ${found?'ok':'no'}">${found?'✓':'✕'}</span>${label}</div>`;
+  const researchSourceNote = rs.report
+    ? '<div class="src-link" style="margin-top:8px">Research is a separate evidence source. It may identify a regulated entity even when the inspected website pages did not name one.</div>'
+    : '';
   const transHtml = [
-    chk('Grievance redressal details', ind.grievance_found),
-    chk('Named lending partner (NBFC/bank)', ind.lending_partner_found),
+    chk('Website sources: grievance redressal details', ind.grievance_found),
+    chk('Website sources: named lending partner (NBFC/bank)', ind.lending_partner_found),
     chk('Registered business address', ind.address_found),
     chk('Interest-rate disclosure', ind.interest_rate_found),
     chk('Contact information', fetchInd.contact_found),
-  ].join('');
+  ].join('') + researchSourceNote;
 
   const kw = fetchInd.complaint_keywords||{};
   const kwChips = Object.entries(kw).filter(([,v])=>v>0).map(([k,v])=>`<span class="chip">${esc(k)}: ${v}</span>`).join('');
@@ -332,7 +336,6 @@ function renderResults(report){
     ? `<img class="screenshot" src="${esc(br.screenshot_url)}" alt="Visual evidence screenshot" onerror="this.parentNode.innerHTML='<div class=\\'no-shot\\'>Screenshot unavailable.</div>'" />`
     : `<div class="no-shot">${d ? 'No screenshot captured.' : 'Visual evidence capture unavailable: '}${esc(br.error||'Capture could not complete.')}</div>`;
 
-  const rs = r.research||{};
   let reportHtml;
   if(rs.report){
     reportHtml = `<div class="report">${esc(rs.report)}</div>`;
@@ -434,6 +437,53 @@ function renderResults(report){
   }
 }
 
+function reconcileReportScore(report){
+  const ind = report.indicators || {};
+  const rbiChecked = Boolean(ind.rbi_checked);
+  const rbiFound = Boolean(ind.rbi_found);
+  const fetchChecked = Boolean(ind.fetch_checked);
+  let score = 100;
+  const deductions = [];
+  if(rbiChecked && !rbiFound){
+    score -= 40;
+    deductions.push({reason:'Application not found in the RBI digital lending apps directory', points:40});
+  } else if(!rbiChecked){
+    score -= 15;
+    deductions.push({reason:'RBI directory could not be checked (lookup failed or unavailable)', points:15});
+  }
+  if(fetchChecked){
+    const fields = [
+      ['grievance_found','No grievance redressal details found in inspected sources',10],
+      ['lending_partner_found','No named lending partner (NBFC / bank) found in inspected sources',15],
+      ['address_found','No registered business address found in inspected sources',5],
+      ['interest_rate_found','No interest-rate disclosure found in inspected sources',10]
+    ];
+    for(const [key, reason, points] of fields){
+      if(!ind[key]){ score -= points; deductions.push({reason, points}); }
+    }
+  }
+  const complaints = Number(ind.complaint_count || 0);
+  if(complaints >= 8){
+    score -= 25;
+    deductions.push({reason:`High complaint signal count (${complaints} complaint-related keywords)`, points:25});
+  } else if(complaints >= 3){
+    score -= 12;
+    deductions.push({reason:`Moderate complaint signal count (${complaints} complaint-related keywords)`, points:12});
+  }
+  score = Math.max(0, Math.min(100, score));
+  report.score = {
+    score,
+    verdict: score >= 70 && rbiChecked ? 'LOWER RISK' : score >= 45 ? 'UNCLEAR' : 'HIGH RISK',
+    confidence: rbiChecked && fetchChecked ? 'high' : 'limited',
+    unverified: [
+      ...(!rbiChecked ? ['RBI directory verification was not completed'] : []),
+      ...(!fetchChecked ? ['Public website inspection was not completed'] : [])
+    ],
+    deductions
+  };
+  return report;
+}
+
 function pollService(step, runId){
   if(!runId) return;
   const pollKey = `${step}:${runId}`;
@@ -458,7 +508,12 @@ function pollService(step, runId){
       if(window.__lastReport){
         const key = step === 'agent' ? 'rbi' : 'research';
         window.__lastReport[key] = {...window.__lastReport[key], ...data};
+        if(step === 'agent'){
+          window.__lastReport.indicators.rbi_checked = Boolean(data.checked);
+          window.__lastReport.indicators.rbi_found = Boolean(data.found);
+        }
         window.__lastReport.service_statuses[step] = status;
+        reconcileReportScore(window.__lastReport);
         if(status === 'completed' || ['failed','cancelled','timed_out','unavailable'].includes(status)){
           renderResults(window.__lastReport);
         }
