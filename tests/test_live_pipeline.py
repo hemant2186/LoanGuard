@@ -646,6 +646,14 @@ def test_monitor_timeline_is_not_completed_and_updates_from_panel():
     assert "setStep('monitor','completed'" not in source
 
 
+def test_async_results_are_recovered_into_final_report_after_polling():
+    index_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "index.html")
+    with open(index_path, encoding="utf-8") as file:
+        source = file.read()
+    assert "const latest = collected[service] && collected[service].data;" in source
+    assert "report[key] = {...report[key], ...latest};" in source
+
+
 # 10. JSON reports contain the actual investigation results
 @pytest.mark.asyncio
 async def test_json_report_contains_actual_results(monkeypatch, tmp_path):

@@ -22,6 +22,10 @@ from .config import get_api_key, get_rbi_url, has_api_key
 
 QUEUE_TIMEOUT_S = float(os.getenv("AGENT_QUEUE_TIMEOUT_S", "30"))
 
+
+def _status_text(status: Any) -> str:
+    return str(getattr(status, "value", status)).upper().split(".")[-1]
+
 # Minimal schema — the API rejects description/title/nullable keywords.
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -80,7 +84,7 @@ def _normalize(agent_result: dict | None, status: Any, error: Any) -> dict[str, 
         "evidence": "",
         "failure_reason": "",
     }
-    completed = str(status).upper().replace("RUNSTATUS.", "") == "COMPLETED"
+    completed = _status_text(status) == "COMPLETED"
     if completed and isinstance(agent_result, dict):
         for k in base:
             if k in agent_result:
@@ -176,8 +180,9 @@ async def get_rbi_directory_status(run_id: str) -> dict[str, Any]:
         out["failure_reason"] = out["error"]
         return out
 
-    raw_status = str(getattr(response, "status", "UNAVAILABLE")).upper().replace("RUNSTATUS.", "")
+    raw_status = _status_text(getattr(response, "status", "UNAVAILABLE"))
     out["raw_status"] = raw_status
+    out["provider_status"] = raw_status
     error = getattr(response, "error", None)
     error_text = getattr(error, "message", error)
     if raw_status == "COMPLETED":

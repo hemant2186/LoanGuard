@@ -194,6 +194,8 @@ const STEP_MAP = Object.fromEntries(STEPS.map(s=>[s.key,s]));
 let es = null;
 let collected = {demo:false};
 let receivedTerminalEvent = false;
+const activePolls = new Set();
+const storedRunIds = JSON.parse(localStorage.getItem('loanguard_run_ids') || '{}');
 const API_BASE_URL = (() => {
   const configured = 'https://loanguard-sqcb.onrender.com';
   return ['localhost', '127.0.0.1'].includes(window.location.hostname) ? '' : configured;
@@ -238,6 +240,7 @@ function setStep(key, status, msg){
 function resetSteps(){
   collected = {demo:false};
   receivedTerminalEvent = false;
+  localStorage.removeItem('loanguard_run_ids');
   STEPS.forEach(s=>setStep(s.key,'pending',STEP_MAP[s.key].exp));
   document.getElementById('results').classList.remove('show');
 }
@@ -431,6 +434,49 @@ function renderResults(report){
   }
 }
 
+function pollService(step, runId){
+  if(!runId) return;
+  const pollKey = `${step}:${runId}`;
+  if(activePolls.has(pollKey)) return;
+  activePolls.add(pollKey);
+  storedRunIds[step] = runId;
+  localStorage.setItem('loanguard_run_ids', JSON.stringify(storedRunIds));
+  const endpoint = step === 'agent' ? '/api/agent/status' : '/api/research/status';
+  let attempts = 0;
+  const poll = async () => {
+    if(attempts++ >= 360){
+      activePolls.delete(pollKey);
+      setStep(step, 'unavailable', 'Polling window ended; the remote run was not confirmed complete.');
+      return;
+    }
+    try {
+      const res = await fetch(apiUrl(`${endpoint}?run_id=${encodeURIComponent(runId)}`), {cache:'no-store'});
+      const data = await res.json();
+      const status = (data.status || 'unavailable').toLowerCase();
+      setStep(step, status, data.error || (status === 'completed' ? 'Result received.' : `TinyFish status: ${status}.`));
+      collected[step] = {step, status, data};
+      if(window.__lastReport){
+        const key = step === 'agent' ? 'rbi' : 'research';
+        window.__lastReport[key] = {...window.__lastReport[key], ...data};
+        window.__lastReport.service_statuses[step] = status;
+        if(status === 'completed' || ['failed','cancelled','timed_out','unavailable'].includes(status)){
+          renderResults(window.__lastReport);
+        }
+      }
+      if(status === 'completed' || ['failed','cancelled','timed_out','unavailable'].includes(status)){
+        activePolls.delete(pollKey);
+        delete storedRunIds[step];
+        localStorage.setItem('loanguard_run_ids', JSON.stringify(storedRunIds));
+        return;
+      }
+    } catch(err) {
+      console.error(`${step} status polling failed`, err);
+    }
+    setTimeout(poll, 5000);
+  };
+  setTimeout(poll, 1000);
+}
+
 function handleEvent(data){
   const step = data.step;
   if(step==='start'){ collected.demo=!!data.demo; setModeTag(data.demo); return; }
@@ -439,36 +485,19 @@ function handleEvent(data){
     document.getElementById('results').classList.add('show'); return; }
   if(step==='final'){
     receivedTerminalEvent = data.status === 'completed';
-    if(data.report) renderResults(data.report);
-    return;
-  }
-  function pollService(step, runId){
-    if(!runId) return;
-    const endpoint = step === 'agent' ? '/api/agent/status' : '/api/research/status';
-    let attempts = 0;
-    const poll = async () => {
-      if(attempts++ >= 60) return;
-      try {
-        const res = await fetch(apiUrl(`${endpoint}?run_id=${encodeURIComponent(runId)}`), {cache:'no-store'});
-        const data = await res.json();
-        const status = (data.status || 'unavailable').toLowerCase();
-        setStep(step, status, data.error || (status === 'completed' ? 'Result received.' : `TinyFish status: ${status}.`));
-        collected[step] = {step, status, data};
-        if(window.__lastReport) {
-          window.__lastReport[step === 'agent' ? 'rbi' : 'research'] =
-            {...window.__lastReport[step === 'agent' ? 'rbi' : 'research'], ...data};
-          window.__lastReport.service_statuses[step] = status;
-          if(status === 'completed' || ['failed','cancelled','timed_out','unavailable'].includes(status)) {
-            renderResults(window.__lastReport);
-          }
+    if(data.report){
+      const report = data.report;
+      for(const service of ['agent','research']){
+        const latest = collected[service] && collected[service].data;
+        if(latest && report[service === 'agent' ? 'rbi' : 'research']){
+          const key = service === 'agent' ? 'rbi' : 'research';
+          report[key] = {...report[key], ...latest};
+          report.service_statuses[service] = latest.status || report.service_statuses[service];
         }
-        if(status === 'completed' || ['failed','cancelled','timed_out','unavailable'].includes(status)) return;
-      } catch(err) {
-        console.error(`${step} status polling failed`, err);
       }
-      setTimeout(poll, 5000);
-    };
-    setTimeout(poll, 5000);
+      renderResults(report);
+    }
+    return;
   }
   if(step==='monitor'){ setStep('monitor', data.status||'not_started', data.message); return; }
   if(STEP_MAP[step]){
@@ -574,6 +603,9 @@ async function doMonitor(){
 document.getElementById('investigate').addEventListener('click',investigate);
 document.getElementById('name').addEventListener('keydown',e=>{if(e.key==='Enter')investigate();});
 renderTimeline();
+for(const step of ['agent','research']){
+  if(storedRunIds[step]) pollService(step, storedRunIds[step]);
+}
 fetch(apiUrl('/api/health')).then(r=>{
   if(!r.ok) throw new Error(`Backend health returned ${r.status}`);
   return r.json();

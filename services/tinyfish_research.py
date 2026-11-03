@@ -15,6 +15,10 @@ from .config import get_api_key, has_api_key
 QUEUE_TIMEOUT_S = float(os.getenv("RESEARCH_QUEUE_TIMEOUT_S", "30"))
 
 
+def _status_text(status: Any) -> str:
+    return str(getattr(status, "value", status)).upper().split(".")[-1]
+
+
 def build_query(name: str, site: str | None) -> str:
     site_part = f" Its website is {site}." if site else ""
     return (
@@ -92,7 +96,8 @@ async def get_research_status(run_id: str) -> dict[str, Any]:
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
         return out
-    raw_status = str(getattr(response, "status", "UNAVAILABLE")).split(".")[-1].upper()
+    raw_status = _status_text(getattr(response, "status", "UNAVAILABLE"))
+    out["provider_status"] = raw_status
     status_map = {"QUEUED": "pending", "RUNNING": "running", "COMPLETED": "completed",
                   "FAILED": "failed", "CANCELLED": "cancelled", "TIMED_OUT": "timed_out"}
     out["status"] = status_map.get(raw_status, "unavailable")

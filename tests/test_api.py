@@ -60,6 +60,8 @@ def test_frontend_uses_render_backend_and_validates_health_status():
     assert "apiUrl('/api/watch')" in source
     assert "const endpoint = step === 'agent' ? '/api/agent/status' : '/api/research/status';" in source
     assert "pollService('research'" in source
+    assert "const activePolls = new Set();" in source
+    assert "for(const service of ['agent','research'])" in source
 
 
 def test_investigate_empty_name(client):
