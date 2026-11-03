@@ -1,9 +1,7 @@
 """TinyFish Research integration (Feature 5) — cited report.
 
-Uses AsyncTinyFish.research.run() (beta). Research is slow (deep mode: 5-20 min),
-so this service is NON-BLOCKING in the pipeline: it runs with a short budget and,
-if it does not finish in time, returns status="running" without failing the
-investigation. Citations are never fabricated — they come from the API only.
+Uses AsyncTinyFish.research.queue() (beta). Research is slow (deep mode: 5-20 min),
+so the pipeline queues it once and retrieves it through a status endpoint.
 """
 
 from __future__ import annotations
@@ -14,7 +12,7 @@ from typing import Any
 
 from .config import get_api_key, has_api_key
 
-RESEARCH_BUDGET_S = float(os.getenv("RESEARCH_BUDGET_S", "90"))
+QUEUE_TIMEOUT_S = float(os.getenv("RESEARCH_QUEUE_TIMEOUT_S", "30"))
 
 
 def build_query(name: str, site: str | None) -> str:
@@ -30,13 +28,14 @@ def build_query(name: str, site: str | None) -> str:
 
 
 async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
-    """Run a cited research report. Never raises; non-blocking on timeout."""
+    """Queue one cited research report. Never raises or waits for deep research."""
     out: dict[str, Any] = {
         "ok": False,
         "status": "pending",
         "report": None,
         "citations": [],
         "run_id": None,
+        "research_run_id": None,
         "error": None,
     }
     if not has_api_key():
@@ -45,8 +44,7 @@ async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
         return out
     try:
         from tinyfish import AsyncTinyFish  # type: ignore
-
-        client = AsyncTinyFish(api_key=get_api_key(), timeout=RESEARCH_BUDGET_S + 30, max_retries=0)
+        client = AsyncTinyFish(api_key=get_api_key(), timeout=60.0, max_retries=0)
     except Exception as exc:  # pragma: no cover
         out["error"] = f"SDK init failed: {exc}"
         out["status"] = "failed"
@@ -54,13 +52,12 @@ async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
 
     try:
         response = await asyncio.wait_for(
-            client.research.run(query=build_query(name, site), mode="deep"),
-            timeout=RESEARCH_BUDGET_S,
+            client.research.queue(query=build_query(name, site), mode="deep"),
+            timeout=QUEUE_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
-        out["status"] = "pending"
-        out["error"] = f"Research pending (budget {RESEARCH_BUDGET_S}s reached; TinyFish deep mode takes 5-20 min in background)"
-        out["notice"] = "Research pending or unavailable. Preliminary evidence summary is based on completed Search and Fetch results."
+        out["status"] = "timed_out"
+        out["error"] = f"Research queue timed out after {QUEUE_TIMEOUT_S}s; no run ID was returned"
         return out
     except Exception as exc:
         out["status"] = "unavailable"
@@ -68,17 +65,54 @@ async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
         out["notice"] = "Research pending or unavailable. Preliminary evidence summary is based on completed Search and Fetch results."
         return out
 
-    status = str(getattr(response, "status", "")).upper()
-    out["run_id"] = getattr(response, "research_run_id", None) or getattr(response, "run_id", None)
+    out["research_run_id"] = getattr(response, "research_run_id", None)
+    out["run_id"] = out["research_run_id"]
+    if not out["research_run_id"]:
+        out["status"] = "unavailable"
+        out["error"] = "Research queue returned no research run ID"
+        return out
+    out["status"] = "pending"
+    out["notice"] = "Research is queued asynchronously. Results are retrieved from TinyFish using this run ID."
+    return out
+
+
+async def get_research_status(run_id: str) -> dict[str, Any]:
+    """Retrieve one research run, including the completed report and citations."""
+    out: dict[str, Any] = {
+        "ok": False, "status": "unavailable", "report": None, "citations": [],
+        "run_id": run_id, "research_run_id": run_id, "error": None,
+    }
+    if not has_api_key():
+        out["error"] = "TINYFISH_API_KEY not configured"
+        return out
+    try:
+        from tinyfish import AsyncTinyFish  # type: ignore
+        client = AsyncTinyFish(api_key=get_api_key(), timeout=60.0, max_retries=0)
+        response = await client.research.get(run_id)
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    raw_status = str(getattr(response, "status", "UNAVAILABLE")).split(".")[-1].upper()
+    status_map = {"QUEUED": "pending", "RUNNING": "running", "COMPLETED": "completed",
+                  "FAILED": "failed", "CANCELLED": "cancelled", "TIMED_OUT": "timed_out"}
+    out["status"] = status_map.get(raw_status, "unavailable")
+    error = getattr(response, "error", None)
+    if error:
+        out["error"] = getattr(error, "message", str(error))
     deep = getattr(response, "deep_result", None)
     report = getattr(deep, "result", None) if deep else None
     citations = getattr(deep, "citations", None) if deep else None
-    if report:
-        out["report"] = report if isinstance(report, str) else str(report)
-        out["citations"] = citations if isinstance(citations, list) else (list(citations) if citations else [])
-        out["status"] = "completed"
+    if out["status"] == "completed" and report:
+        out["report"] = report
+        out["citations"] = [
+            citation if isinstance(citation, dict)
+            else {"title": str(citation), "url": str(citation)}
+            for citation in (citations or [])
+        ]
         out["ok"] = True
-    else:
+    elif out["status"] == "completed":
         out["status"] = "unavailable"
-        out["error"] = "Research completed but returned no report (status={})".format(status)
+        out["error"] = "Research completed but returned no deep report"
+    elif not out["error"] and out["status"] in {"failed", "cancelled", "timed_out"}:
+        out["error"] = f"Research ended with status {raw_status}"
     return out

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, Request
@@ -35,11 +36,11 @@ from services.config import (
     is_demo_mode,
 )
 from services.scoring import Indicators, compute_score
-from services.tinyfish_agent import check_rbi_directory
+from services.tinyfish_agent import check_rbi_directory, get_rbi_directory_status
 from services.tinyfish_browser import capture_screenshot
 from services.tinyfish_fetch import fetch_pages
 from services.tinyfish_monitor import create_monitor
-from services.tinyfish_research import run_research
+from services.tinyfish_research import run_research, get_research_status
 from services.tinyfish_search import search_loan_app
 
 ALERTS_FILE = os.path.join(PROJECT_ROOT, "demo", "alerts.json")
@@ -50,6 +51,8 @@ DISCLAIMER = (
     "RBI. Always verify directly with the regulated lender before borrowing."
 )
 PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "https://loanguard-sqcb.onrender.com").rstrip("/")
+_active_monitor: dict[str, Any] | None = None
+_monitor_lock = asyncio.Lock()
 
 app = FastAPI(title="LoanGuard", version="1.0.0")
 app.add_middleware(
@@ -219,93 +222,160 @@ async def investigate_stream(name: str, site: str | None) -> AsyncGenerator[str,
                          "error": "API key not configured", "disclaimer": DISCLAIMER}})
         return
 
-    # 1. SEARCH — Real Public Web Discovery
-    yield _sse("search", {"status": "started", "message": f"Discovering public evidence for '{name}' across web indices..."})
-    search = await search_loan_app(name, site=site)
-    search_ok = bool(search.get("ok"))
-    search_status = search.get("status", "completed" if search_ok else "failed")
-    search_count = len(search.get("results", []))
-    search_msg = (
-        f"Public evidence discovered ({search_count} sources found)."
-        if search_ok
-        else f"Public evidence discovery failed: {search.get('error', 'No results returned')}"
-    )
-    yield _sse("search", {"status": search_status, "message": search_msg, "data": search})
+    async def isolated(coro: Any) -> Any:
+        try:
+            return await coro
+        except asyncio.TimeoutError:
+            return {"ok": False, "status": "timed_out", "error": "Service timed out"}
+        except Exception as exc:
+            return {"ok": False, "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
 
-    effective_site = site or search.get("identified_site")
+    def service_message(service: str, result: dict[str, Any]) -> str:
+        error = result.get("error") or result.get("failure_reason") or "Service unavailable"
+        if service == "search":
+            return (
+                f"Public evidence discovered ({len(result.get('results', []))} sources found)."
+                if result.get("ok") else f"Public evidence discovery failed: {error}"
+            )
+        if service == "agent":
+            if result.get("checked"):
+                return f"RBI directory check completed: {'Found in directory' if result.get('found') else 'Not listed in directory'}."
+            if result.get("run_id"):
+                return f"RBI directory check queued (run ID: {result['run_id']})."
+            return f"RBI directory check {result.get('status', 'unavailable')}: {error}"
+        if service == "research":
+            if result.get("ok"):
+                return f"Cited research report prepared ({len(result.get('citations', []))} citations)."
+            if result.get("run_id"):
+                return f"Research queued (run ID: {result['run_id']}); result will be retrieved asynchronously."
+            return f"Research {result.get('status', 'unavailable')}: {error}"
+        if service == "fetch":
+            return (
+                f"Public websites inspected ({len(result.get('results', []))} pages analyzed)."
+                if result.get("ok") else f"Public website inspection failed: {error}"
+            )
+        return "Visual evidence captured." if result.get("ok") else f"Visual evidence capture failed: {error}"
 
-    # 2. AGENT — Real RBI Directory Investigation
-    yield _sse("agent", {"status": "started", "message": "Investigating official RBI digital lending apps directory..."})
-    rbi = await check_rbi_directory(name)
-    agent_status = rbi.get("status", "completed" if rbi.get("checked") else "unavailable")
-    if rbi.get("checked"):
-        agent_msg = f"RBI directory check completed: {'Found in directory' if rbi.get('found') else 'Not listed in directory'}."
-    elif agent_status == "timed out":
-        agent_msg = "RBI directory check timed out (verification incomplete; this does not indicate absence)."
-    else:
-        agent_msg = f"RBI directory check unavailable ({rbi.get('failure_reason') or rbi.get('error') or 'Unreachable'})."
-    yield _sse("agent", {"status": agent_status, "message": agent_msg, "data": rbi})
+    async def prepare_browser(result: Any, shot_url: str) -> dict[str, Any]:
+        browser = result if isinstance(result, dict) else {
+            "ok": False, "status": "failed", "error": "Browser task returned no result"
+        }
+        if browser.get("ok"):
+            screenshot_url = browser.get("screenshot_url")
+            screenshot_path = browser.get("screenshot_path")
+            if not screenshot_url or not screenshot_path or not os.path.isfile(screenshot_path):
+                browser = {
+                    **browser, "ok": False, "status": "failed",
+                    "screenshot_url": None,
+                    "error": "Screenshot was not persisted as accessible evidence",
+                }
+            elif screenshot_url.startswith("/"):
+                browser = {**browser, "screenshot_url": f"{PUBLIC_BACKEND_URL}{screenshot_url}"}
+        return {
+            key: value for key, value in browser.items()
+            if key not in {"session_id", "cdp_url", "screenshot_path"}
+        }
 
-    # 3. FETCH — Real Website Investigation
-    yield _sse("fetch", {"status": "started", "message": "Inspecting public websites and regulatory disclosures..."})
-    urls = _collect_fetch_urls(effective_site, search)
-    fetch = await fetch_pages(urls, purpose=f"Investigate the loan app {name} for risk indicators and regulatory disclosures")
-    fetch_ok = bool(fetch.get("ok"))
-    fetch_status = fetch.get("status", "completed" if fetch_ok else "failed")
-    fetch_count = len(fetch.get("results", []))
-    fetch_msg = (
-        f"Public websites inspected ({fetch_count} pages analyzed)."
-        if fetch_ok
-        else f"Public website inspection failed: {fetch.get('error', 'Could not access pages')}"
-    )
-    yield _sse("fetch", {"status": fetch_status, "message": fetch_msg, "data": fetch})
-
-    # 4. BROWSER — Real Visual Evidence Capture
-    yield _sse("browser", {"status": "started", "message": "Capturing visual evidence via remote browser session..."})
-    shot_url = effective_site or (search["results"][0]["url"] if search.get("results") else "")
-    if shot_url:
-        browser = await capture_screenshot(shot_url, name)
-    else:
-        browser = {"ok": False, "status": "failed", "error": "No website URL available for visual evidence capture"}
-    if browser.get("ok"):
-        screenshot_url = browser.get("screenshot_url")
-        screenshot_path = browser.get("screenshot_path")
-        if not screenshot_url or not screenshot_path or not os.path.isfile(screenshot_path):
-            browser = {
-                **browser,
-                "ok": False,
-                "status": "failed",
-                "screenshot_url": None,
-                "error": "Screenshot was not persisted as accessible evidence",
-            }
-        elif screenshot_url.startswith("/"):
-            browser = {**browser, "screenshot_url": f"{PUBLIC_BACKEND_URL}{screenshot_url}"}
-    browser = {
-        key: value
-        for key, value in browser.items()
-        if key not in {"session_id", "cdp_url", "screenshot_path"}
+    # First wave: Search, Agent and Research are independent. If the user
+    # supplied a site, Fetch and Browser can join this wave immediately.
+    search_task = asyncio.create_task(isolated(search_loan_app(name, site=site)))
+    agent_task = asyncio.create_task(isolated(check_rbi_directory(name)))
+    research_task = asyncio.create_task(isolated(run_research(name, site)))
+    tasks: dict[asyncio.Task[Any], str] = {
+        search_task: "search", agent_task: "agent", research_task: "research"
     }
-    browser_status = browser.get("status", "completed" if browser.get("ok") else "failed")
-    browser_msg = (
-        "Visual evidence captured."
-        if browser.get("ok")
-        else f"Visual evidence capture failed: {browser.get('error', 'Capture failed')}"
-    )
-    yield _sse("browser", {"status": browser_status, "message": browser_msg, "data": browser})
-
-    # 5. RESEARCH — Real Cited Report
+    yield _sse("search", {"status": "started", "message": f"Discovering public evidence for '{name}' across web indices..."})
+    yield _sse("agent", {"status": "started", "message": "Investigating official RBI digital lending apps directory..."})
     yield _sse("research", {"status": "started", "message": "Preparing cited analytical findings..."})
-    research = await run_research(name, effective_site)
-    research_status = research.get("status", "completed" if research.get("ok") else "pending")
-    if research.get("ok"):
-        research_msg = f"Cited research report prepared ({len(research.get('citations', []))} citations)."
-    elif research_status == "pending":
-        research_msg = "Research pending (deep mode executes in background; not blocking investigation)."
-    else:
-        research_msg = f"Research unavailable: {research.get('error', 'Service unavailable')}"
-    yield _sse("research", {"status": research_status, "message": research_msg, "data": research})
 
-    # 6. MONITOR — Real Monitor Stage (On-demand)
+    search: dict[str, Any] = {"ok": False, "status": "pending", "results": [], "error": None}
+    rbi: dict[str, Any] = {"ok": False, "status": "pending", "checked": False, "found": False}
+    research: dict[str, Any] = {"ok": False, "status": "pending", "report": None, "citations": []}
+    fetch: dict[str, Any] = {"ok": False, "status": "pending", "results": [], "indicators": {}}
+    browser: dict[str, Any] = {"ok": False, "status": "pending"}
+    fetch_started = False
+
+    async def launch_fetch_browser(effective_site: str | None, search_result: dict[str, Any]) -> list[str]:
+        nonlocal fetch_started
+        if fetch_started:
+            return []
+        fetch_started = True
+        urls = _collect_fetch_urls(effective_site, search_result)
+        shot_url = effective_site or (search_result.get("results") or [{}])[0].get("url", "")
+        fetch_task = asyncio.create_task(isolated(fetch_pages(
+            urls, purpose=f"Investigate the loan app {name} for risk indicators and regulatory disclosures"
+        )))
+        browser_task = asyncio.create_task(isolated(
+            capture_screenshot(shot_url, name) if shot_url else asyncio.sleep(
+                0, result={"ok": False, "status": "failed", "error": "No website URL available for visual evidence capture"}
+            )
+        ))
+        tasks[fetch_task] = "fetch"
+        tasks[browser_task] = "browser"
+        return urls
+
+    if site:
+        await launch_fetch_browser(site, {"results": []})
+        yield _sse("fetch", {"status": "started", "message": "Inspecting public websites and regulatory disclosures..."})
+        yield _sse("browser", {"status": "started", "message": "Capturing visual evidence via remote browser session..."})
+
+    # Process results independently. Search unlocks Fetch and Browser when no
+    # official site was supplied, without waiting for Agent or Research.
+    while tasks:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            service = tasks.pop(task)
+            result = task.result()
+            if not isinstance(result, dict):
+                result = {"ok": False, "status": "failed", "error": "Service returned an invalid result"}
+            if service == "search":
+                search = result
+                effective_site = site or search.get("identified_site")
+                if not site:
+                    await launch_fetch_browser(effective_site, search)
+                    yield _sse("fetch", {"status": "started", "message": "Inspecting public websites and regulatory disclosures..."})
+                    yield _sse("browser", {"status": "started", "message": "Capturing visual evidence via remote browser session..."})
+            elif service == "agent":
+                rbi = result
+            elif service == "research":
+                research = result
+            elif service == "fetch":
+                fetch = result
+            elif service == "browser":
+                browser = await prepare_browser(result, site or search.get("identified_site", ""))
+            yield _sse(service, {
+                "status": result.get("status", "completed" if result.get("ok") else "failed"),
+                "message": service_message(service, result),
+                "data": result,
+            })
+        if search.get("status") in {"completed", "failed", "unavailable"} and fetch_started:
+            core_done = (
+                search.get("status") in {"completed", "failed", "unavailable"}
+                and fetch.get("status") not in {"pending"}
+                and browser.get("status") not in {"pending"}
+            )
+            if core_done:
+                # Agent/Research are queued operations; their real results are
+                # retrieved by the existing polling endpoints and must not hold
+                # up the preliminary report.
+                for task in list(tasks):
+                    if task.done():
+                        tasks.pop(task)
+                        service = "agent" if task is agent_task else "research"
+                        result = task.result()
+                        if isinstance(result, dict):
+                            if service == "agent":
+                                rbi = result
+                            else:
+                                research = result
+                            yield _sse(service, {
+                                "status": result.get("status", "pending"),
+                                "message": service_message(service, result),
+                                "data": result,
+                            })
+                break
+
+    # Monitor remains an optional, user-triggered operation.
     yield _sse("monitor", {"status": "not_started",
                            "message": "Monitor is not created until you click Monitor RBI directory."})
 
@@ -355,10 +425,31 @@ async def watch(request: Request):
     webhook_url = body.get("webhook_url")
     # If in demo mode, simulate.
     if is_demo_mode():
-        return {"ok": True, "demo": True, "monitor_id": "demo-monitor-001", "status": "created",
+        return {"ok": True, "demo": True, "monitor_id": "demo-monitor-001", "status": "active",
                 "message": "SIMULATED MONITOR — SAMPLE DATA. Monitoring the RBI directory (simulated)."}
-    result = await create_monitor(webhook_url=webhook_url)
+    global _active_monitor
+    async with _monitor_lock:
+        if _active_monitor and _active_monitor.get("ok") and _active_monitor.get("monitor_id"):
+            return _active_monitor
+        result = await create_monitor(webhook_url=webhook_url)
+        if result.get("ok") and result.get("monitor_id"):
+            result["status"] = "active"
+            _active_monitor = result
     return result
+
+
+@app.get("/api/agent/status")
+async def agent_status(run_id: str):
+    if not run_id.strip():
+        return JSONResponse({"error": "An agent run ID is required."}, status_code=400)
+    return await get_rbi_directory_status(run_id)
+
+
+@app.get("/api/research/status")
+async def research_status(run_id: str):
+    if not run_id.strip():
+        return JSONResponse({"error": "A research run ID is required."}, status_code=400)
+    return await get_research_status(run_id)
 
 
 @app.post("/api/webhook")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -57,12 +58,32 @@ def test_frontend_uses_render_backend_and_validates_health_status():
     assert "if(h.status !== 'ok')" in source
     assert "fetch(apiUrl('/api/health'))" in source
     assert "apiUrl('/api/watch')" in source
+    assert "const endpoint = step === 'agent' ? '/api/agent/status' : '/api/research/status';" in source
+    assert "pollService('research'" in source
 
 
 def test_investigate_empty_name(client):
     response = client.get("/api/investigate?name=")
     assert response.status_code == 400
     assert "required" in response.json().get("error", "").lower()
+
+
+def test_research_status_polling_does_not_queue_another_run(client):
+    import main
+    result = {
+        "ok": True, "status": "completed", "research_run_id": "research-1",
+        "report": "Actual report", "citations": [{"title": "RBI", "url": "https://rbi.org.in"}],
+    }
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        status_mock = AsyncMock(return_value=result)
+        queue_mock = AsyncMock()
+        monkeypatch.setattr(main, "get_research_status", status_mock)
+        monkeypatch.setattr(main, "run_research", queue_mock)
+        first = client.get("/api/research/status?run_id=research-1")
+        second = client.get("/api/research/status?run_id=research-1")
+    assert first.json()["report"] == "Actual report"
+    assert second.json()["research_run_id"] == "research-1"
+    queue_mock.assert_not_called()
 
 
 def test_watch_endpoint_demo_mode(client, monkeypatch):
@@ -73,6 +94,7 @@ def test_watch_endpoint_demo_mode(client, monkeypatch):
     assert data["ok"] is True
     assert data["demo"] is True
     assert "SAMPLE DATA" in data["message"]
+    assert data["status"] == "active"
 
 
 def test_webhook_and_alerts_endpoints(client, tmp_path, monkeypatch):

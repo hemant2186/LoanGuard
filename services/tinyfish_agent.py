@@ -1,6 +1,6 @@
 """TinyFish Agent integration (Feature 2) — the core RBI directory check.
 
-Uses AsyncTinyFish.agent.run() with a structured output_schema to check the RBI
+Uses AsyncTinyFish.agent.queue() with a structured output_schema to check the RBI
 "Digital Lending Apps deployed by Regulated Entities" directory for a given app.
 
 Key behaviour:
@@ -20,7 +20,7 @@ from typing import Any
 
 from .config import get_api_key, get_rbi_url, has_api_key
 
-RUN_TIMEOUT_S = float(os.getenv("AGENT_RUN_TIMEOUT_S", "240"))
+QUEUE_TIMEOUT_S = float(os.getenv("AGENT_QUEUE_TIMEOUT_S", "30"))
 
 # Minimal schema — the API rejects description/title/nullable keywords.
 OUTPUT_SCHEMA = {
@@ -80,16 +80,16 @@ def _normalize(agent_result: dict | None, status: Any, error: Any) -> dict[str, 
         "evidence": "",
         "failure_reason": "",
     }
-    completed = str(status) in ("RunStatus.COMPLETED", "COMPLETED", "completed")
+    completed = str(status).upper().replace("RUNSTATUS.", "") == "COMPLETED"
     if completed and isinstance(agent_result, dict):
         for k in base:
             if k in agent_result:
                 base[k] = agent_result[k]
     if not completed:
-        base["failure_reason"] = (
-            f"Agent run did not complete (status={status}). "
-            + (f"error={getattr(error, 'message', error)}" if error else "")
-        )
+        error_text = getattr(error, "message", error)
+        base["failure_reason"] = f"Agent run did not complete (status={status})."
+        if error_text:
+            base["failure_reason"] += f" error={error_text}"
     # Guard: a failed check must never read as confirmed absence.
     if not base["checked"] and base["found"]:
         base["found"] = False
@@ -97,7 +97,7 @@ def _normalize(agent_result: dict | None, status: Any, error: Any) -> dict[str, 
 
 
 async def check_rbi_directory(name: str) -> dict[str, Any]:
-    """Check the RBI directory for `name`. Never raises."""
+    """Queue an RBI directory check and return its actual run ID."""
     out: dict[str, Any] = {
         "ok": False,
         "status": "failed",
@@ -110,6 +110,7 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
         "error": None,
         "raw_status": None,
         "num_of_steps": None,
+        "run_id": None,
     }
     if not has_api_key():
         out["error"] = "TINYFISH_API_KEY not configured"
@@ -119,7 +120,7 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
     try:
         from tinyfish import AsyncTinyFish  # type: ignore
 
-        client = AsyncTinyFish(api_key=get_api_key(), timeout=300.0, max_retries=0)
+        client = AsyncTinyFish(api_key=get_api_key(), timeout=60.0, max_retries=0)
     except Exception as exc:  # pragma: no cover
         out["error"] = f"SDK init failed: {exc}"
         out["failure_reason"] = str(exc)
@@ -128,13 +129,13 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
 
     try:
         response = await asyncio.wait_for(
-            client.agent.run(goal=build_goal(name), url=get_rbi_url(), output_schema=OUTPUT_SCHEMA),
-            timeout=RUN_TIMEOUT_S,
+            client.agent.queue(goal=build_goal(name), url=get_rbi_url(), output_schema=OUTPUT_SCHEMA),
+            timeout=QUEUE_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
-        out["error"] = f"Agent run timed out after {RUN_TIMEOUT_S}s"
-        out["failure_reason"] = "RBI directory lookup timed out. Verification was unsuccessful; this does NOT indicate absence."
-        out["status"] = "timed out"
+        out["error"] = f"Agent queue timed out after {QUEUE_TIMEOUT_S}s"
+        out["failure_reason"] = "RBI directory request timed out before a run ID was returned. This does NOT indicate absence."
+        out["status"] = "timed_out"
         return out
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
@@ -142,13 +143,55 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
         out["status"] = "failed"
         return out
 
-    status = getattr(response, "status", None)
+    out["run_id"] = getattr(response, "run_id", None)
     error = getattr(response, "error", None)
-    result = getattr(response, "result", None)
-    out["raw_status"] = str(status)
-    out["num_of_steps"] = getattr(response, "num_of_steps", None)
-    normalized = _normalize(result if isinstance(result, dict) else None, status, error)
-    out.update(normalized)
-    out["ok"] = bool(out["checked"])
-    out["status"] = "completed" if out["checked"] else "unavailable"
+    if not out["run_id"]:
+        out["error"] = getattr(error, "message", error) or "Agent queue returned no run ID"
+        out["failure_reason"] = str(out["error"])
+        out["status"] = "unavailable"
+        return out
+    out["raw_status"] = "PENDING"
+    out["status"] = "pending"
+    out["message"] = f"RBI directory check queued (run ID: {out['run_id']})."
+    return out
+
+
+async def get_rbi_directory_status(run_id: str) -> dict[str, Any]:
+    """Retrieve and normalize one queued RBI directory run."""
+    out: dict[str, Any] = {
+        "ok": False, "status": "unavailable", "checked": False, "found": False,
+        "matched_name": "", "lending_entity": "", "evidence": "",
+        "failure_reason": "", "error": None, "raw_status": None, "run_id": run_id,
+    }
+    if not has_api_key():
+        out["error"] = "TINYFISH_API_KEY not configured"
+        out["failure_reason"] = out["error"]
+        return out
+    try:
+        from tinyfish import AsyncTinyFish  # type: ignore
+        client = AsyncTinyFish(api_key=get_api_key(), timeout=60.0, max_retries=0)
+        response = await client.runs.get(run_id)
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        out["failure_reason"] = out["error"]
+        return out
+
+    raw_status = str(getattr(response, "status", "UNAVAILABLE")).upper().replace("RUNSTATUS.", "")
+    out["raw_status"] = raw_status
+    error = getattr(response, "error", None)
+    error_text = getattr(error, "message", error)
+    if raw_status == "COMPLETED":
+        out.update(_normalize(getattr(response, "result", None), raw_status, error))
+        out["ok"] = bool(out["checked"])
+        out["status"] = "completed" if out["checked"] else "unavailable"
+    elif raw_status in {"PENDING", "RUNNING"}:
+        out["status"] = raw_status.lower()
+    elif raw_status in {"TIMED_OUT", "TIMEOUT"} or getattr(error, "code", "") in {"TIMEOUT", "TIMED_OUT"}:
+        out["status"] = "timed_out"
+        out["error"] = error_text or "Agent run timed out"
+        out["failure_reason"] = f"{out['error']}. This does NOT indicate absence."
+    else:
+        out["status"] = "failed"
+        out["error"] = error_text or f"Agent run ended with status {raw_status}"
+        out["failure_reason"] = str(out["error"])
     return out

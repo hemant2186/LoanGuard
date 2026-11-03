@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -29,7 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from main import app, investigate_stream, _build_indicators
 from services.scoring import Indicators, compute_score
 from services.tinyfish_search import default_queries, identify_official_website
-from services.tinyfish_agent import _normalize
+from services.tinyfish_agent import _normalize, check_rbi_directory, get_rbi_directory_status
+from services.tinyfish_research import run_research, get_research_status
 
 
 @pytest.fixture
@@ -128,6 +130,165 @@ async def test_live_mode_never_loads_sample_fixtures(monkeypatch):
         assert rep["score"]["score"] == 100
 
 
+@pytest.mark.asyncio
+async def test_first_wave_starts_search_agent_and_research_concurrently(monkeypatch):
+    monkeypatch.setenv("DEMO_MODE", "0")
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+    started: set[str] = set()
+    release = asyncio.Event()
+
+    async def first_wave(service: str):
+        started.add(service)
+        if len(started) == 3:
+            release.set()
+        await release.wait()
+        if service == "search":
+            return {"ok": True, "status": "completed", "results": [], "identified_site": None}
+        if service == "agent":
+            return {"ok": False, "status": "pending", "run_id": "agent-1", "checked": False, "found": False}
+        return {"ok": False, "status": "pending", "research_run_id": "research-1", "run_id": "research-1"}
+
+    async def empty_fetch(*args, **kwargs):
+        return {"ok": False, "status": "failed", "results": [], "indicators": {}, "error": "No URLs to fetch"}
+
+    async def empty_browser(*args, **kwargs):
+        return {"ok": False, "status": "failed", "error": "No URL"}
+
+    async def search(*args, **kwargs):
+        return await first_wave("search")
+
+    async def agent(*args, **kwargs):
+        return await first_wave("agent")
+
+    async def research(*args, **kwargs):
+        return await first_wave("research")
+
+    with patch("main.search_loan_app", new=search), \
+         patch("main.check_rbi_directory", new=agent), \
+         patch("main.run_research", new=research), \
+         patch("main.fetch_pages", empty_fetch), \
+         patch("main.capture_screenshot", empty_browser):
+        events = [json.loads(chunk.removeprefix("data: ").strip())
+                  async for chunk in investigate_stream("WaveApp", None)]
+
+    assert started == {"search", "agent", "research"}
+    assert any(e["step"] == "research" and e["status"] == "pending" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_browser_start_concurrently_after_search_without_site(monkeypatch):
+    monkeypatch.setenv("DEMO_MODE", "0")
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+    starts: list[str] = []
+    fetch_started = asyncio.Event()
+    browser_started = asyncio.Event()
+
+    async def search(*args, **kwargs):
+        return {"ok": True, "status": "completed",
+                "results": [{"url": "https://official.example"}],
+                "identified_site": "https://official.example"}
+
+    async def fetch(*args, **kwargs):
+        starts.append("fetch")
+        fetch_started.set()
+        await browser_started.wait()
+        return {"ok": True, "status": "completed", "results": [], "indicators": {}}
+
+    async def browser(*args, **kwargs):
+        starts.append("browser")
+        browser_started.set()
+        await fetch_started.wait()
+        return {"ok": False, "status": "failed", "error": "mocked"}
+
+    with patch("main.search_loan_app", search), \
+         patch("main.check_rbi_directory", AsyncMock(return_value={"ok": False, "status": "pending", "run_id": "a"})), \
+         patch("main.run_research", AsyncMock(return_value={"ok": False, "status": "pending", "run_id": "r"})), \
+         patch("main.fetch_pages", fetch), \
+         patch("main.capture_screenshot", browser):
+        events = [json.loads(chunk.removeprefix("data: ").strip())
+                  async for chunk in investigate_stream("DependentApp", None)]
+
+    assert set(starts) == {"fetch", "browser"}
+    assert [e["step"] for e in events].index("fetch") < len(events)
+    assert any(e["step"] == "browser" and e["status"] == "failed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_supplied_site_starts_fetch_and_browser_in_first_wave(monkeypatch):
+    monkeypatch.setenv("DEMO_MODE", "0")
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+    starts: set[str] = set()
+    release = asyncio.Event()
+
+    async def service(name: str, result: dict[str, Any]):
+        starts.add(name)
+        if len(starts) == 5:
+            release.set()
+        await release.wait()
+        return result
+
+    async def search(*args, **kwargs):
+        return await service("search", {"ok": True, "status": "completed", "results": []})
+
+    async def agent(*args, **kwargs):
+        return await service("agent", {"ok": False, "status": "pending", "run_id": "a"})
+
+    async def research(*args, **kwargs):
+        return await service("research", {"ok": False, "status": "pending", "run_id": "r"})
+
+    async def fetch(*args, **kwargs):
+        return await service("fetch", {"ok": True, "status": "completed", "results": [], "indicators": {}})
+
+    async def browser(*args, **kwargs):
+        return await service("browser", {"ok": False, "status": "failed", "error": "mocked"})
+
+    with patch("main.search_loan_app", new=search), \
+         patch("main.check_rbi_directory", new=agent), \
+         patch("main.run_research", new=research), \
+         patch("main.fetch_pages", new=fetch), \
+         patch("main.capture_screenshot", new=browser):
+        await asyncio.wait_for(
+            _collect_events(investigate_stream("SuppliedSiteApp", "https://official.example")),
+            timeout=1,
+        )
+    assert starts == {"search", "agent", "research", "fetch", "browser"}
+
+
+@pytest.mark.asyncio
+async def test_agent_timeout_does_not_block_preliminary_report(monkeypatch):
+    monkeypatch.setenv("DEMO_MODE", "0")
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+
+    async def slow_agent(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return {"ok": False, "status": "timed_out", "checked": False, "found": False,
+                "failure_reason": "does NOT indicate absence"}
+
+    with patch("main.search_loan_app", AsyncMock(return_value={
+            "ok": True, "status": "completed", "results": [],
+        })), \
+         patch("main.check_rbi_directory", side_effect=slow_agent), \
+         patch("main.run_research", AsyncMock(return_value={
+             "ok": False, "status": "pending", "run_id": "research-1",
+         })), \
+         patch("main.fetch_pages", AsyncMock(return_value={
+             "ok": False, "status": "failed", "results": [], "indicators": {},
+         })), \
+         patch("main.capture_screenshot", AsyncMock(return_value={
+             "ok": False, "status": "failed", "error": "mocked",
+         })):
+        events = await asyncio.wait_for(
+            _collect_events(investigate_stream("TimeoutApp", "https://official.example")),
+            timeout=0.03,
+        )
+    assert any(e["step"] == "final" for e in events)
+    assert not any(e["step"] == "agent" and e.get("status") == "timed_out" for e in events)
+
+
+async def _collect_events(stream):
+    return [json.loads(chunk.removeprefix("data: ").strip()) async for chunk in stream]
+
+
 # 3. Live Search results are displayed and identify official domains
 def test_identify_official_website_from_search():
     results = [
@@ -154,6 +315,133 @@ def test_agent_non_completed_result_cannot_confirm_directory_check():
     assert result["checked"] is False
     assert result["found"] is False
     assert "did not complete" in result["failure_reason"]
+
+
+@pytest.mark.asyncio
+async def test_agent_queue_and_result_retrieval(monkeypatch):
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+
+    class FakeAgent:
+        async def queue(self, **kwargs):
+            return type("Queued", (), {"run_id": "agent-run-1", "error": None})()
+
+    class FakeRuns:
+        async def get(self, run_id):
+            assert run_id == "agent-run-1"
+            return type("Run", (), {
+                "status": "COMPLETED",
+                "result": {"checked": True, "found": True, "matched_name": "KreditBee",
+                           "lending_entity": "Example Bank", "evidence": "directory row",
+                           "failure_reason": ""},
+                "error": None,
+            })()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.agent, self.runs = FakeAgent(), FakeRuns()
+
+    with patch("tinyfish.AsyncTinyFish", FakeClient):
+        queued = await check_rbi_directory("KreditBee")
+        result = await get_rbi_directory_status(queued["run_id"])
+    assert queued["status"] == "pending"
+    assert queued["run_id"] == "agent-run-1"
+    assert result["status"] == "completed"
+    assert result["found"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_timeout_and_access_denied_are_not_absence(monkeypatch):
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+
+    class FakeRuns:
+        async def get(self, run_id):
+            return type("Run", (), {
+                "status": "FAILED", "result": {"checked": True, "found": True},
+                "error": type("Error", (), {"message": "Unauthorized Access", "code": "ACCESS_DENIED"})(),
+            })()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.runs = FakeRuns()
+
+    with patch("tinyfish.AsyncTinyFish", FakeClient):
+        result = await get_rbi_directory_status("agent-denied")
+    assert result["status"] == "failed"
+    assert result["checked"] is False
+    assert result["found"] is False
+    assert "Unauthorized Access" in result["failure_reason"]
+
+    class SlowAgent:
+        async def queue(self, **kwargs):
+            await asyncio.sleep(0.01)
+
+    class SlowClient:
+        def __init__(self, **kwargs):
+            self.agent = SlowAgent()
+
+    import services.tinyfish_agent as agent_service
+    monkeypatch.setattr(agent_service, "QUEUE_TIMEOUT_S", 0.001)
+    with patch("tinyfish.AsyncTinyFish", SlowClient):
+        timed_out = await check_rbi_directory("SlowApp")
+    assert timed_out["status"] == "timed_out"
+    assert timed_out["found"] is False
+    assert "does NOT indicate absence" in timed_out["failure_reason"]
+
+
+@pytest.mark.asyncio
+async def test_research_queue_and_completed_report_with_citations(monkeypatch):
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+
+    class FakeResearch:
+        async def queue(self, **kwargs):
+            return type("Queued", (), {"research_run_id": "research-run-1"})()
+        async def get(self, run_id):
+            return type("Research", (), {
+                "status": "COMPLETED",
+                "deep_result": type("Deep", (), {
+                    "result": "Verified report", "citations": ["https://rbi.org.in/source"]
+                })(),
+                "error": None,
+            })()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.research = FakeResearch()
+
+    with patch("tinyfish.AsyncTinyFish", FakeClient):
+        queued = await run_research("KreditBee")
+        result = await get_research_status(queued["research_run_id"])
+    assert queued["status"] == "pending"
+    assert queued["research_run_id"] == "research-run-1"
+    assert result["status"] == "completed"
+    assert result["report"] == "Verified report"
+    assert result["citations"] == [{"title": "https://rbi.org.in/source", "url": "https://rbi.org.in/source"}]
+
+
+@pytest.mark.asyncio
+async def test_research_failure_and_cancellation(monkeypatch):
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+
+    class FakeResearch:
+        def __init__(self):
+            self.status = "FAILED"
+        async def get(self, run_id):
+            return type("Research", (), {
+                "status": self.status, "deep_result": None,
+                "error": type("Error", (), {"message": "provider failure"})(),
+            })()
+
+    fake_research = FakeResearch()
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.research = fake_research
+
+    with patch("tinyfish.AsyncTinyFish", FakeClient):
+        failed = await get_research_status("research-failed")
+        fake_research.status = "CANCELLED"
+        cancelled = await get_research_status("research-cancelled")
+    assert failed["status"] == "failed"
+    assert cancelled["status"] == "cancelled"
 
 
 # 4. Fetch failure is handled correctly
@@ -314,6 +602,48 @@ async def test_monitor_creation_only_on_watch_endpoint(monkeypatch, client):
         assert resp.status_code == 200
         mock_monitor_func.assert_called_once()
         assert resp.json()["monitor_id"] == "mon_live_123"
+
+
+@pytest.mark.asyncio
+async def test_monitor_creation_is_active_and_not_duplicated(monkeypatch, client):
+    import main
+    main._active_monitor = None
+
+
+def test_monitor_creation_failure_preserves_provider_error(monkeypatch, client):
+    import main
+    main._active_monitor = None
+    monkeypatch.setenv("DEMO_MODE", "0")
+    with patch("main.create_monitor", AsyncMock(return_value={
+        "ok": False, "status": "unavailable", "error": "402: insufficient credits",
+        "message": "Monitoring unavailable — insufficient credits for this beta feature.",
+    })):
+        response = client.post("/api/watch", json={})
+    assert response.json()["ok"] is False
+    assert "insufficient credits" in response.json()["error"]
+    monkeypatch.setenv("DEMO_MODE", "0")
+    monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
+    mock_monitor_func = AsyncMock(return_value={
+        "ok": True, "monitor_id": "mon-live-active", "status": "created",
+        "message": "Monitor created",
+    })
+    with patch("main.create_monitor", mock_monitor_func):
+        first = client.post("/api/watch", json={})
+        second = client.post("/api/watch", json={})
+    assert first.json()["status"] == "active"
+    assert second.json()["status"] == "active"
+    assert second.json()["monitor_id"] == "mon-live-active"
+    mock_monitor_func.assert_awaited_once()
+    main._active_monitor = None
+
+
+def test_monitor_timeline_is_not_completed_and_updates_from_panel():
+    index_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "index.html")
+    with open(index_path, encoding="utf-8") as file:
+        source = file.read()
+    assert "status:'active'" in source
+    assert "setStep('monitor','active'" in source
+    assert "setStep('monitor','completed'" not in source
 
 
 # 10. JSON reports contain the actual investigation results

@@ -62,12 +62,15 @@
   .st-failed{background:var(--soft-red);color:#b91c1c}
   .st-unavailable{background:#fef3c7;color:#92400e}
   .st-timed_out{background:#ffedd5;color:#9a3412}
+  .st-cancelled{background:#fef3c7;color:#92400e}
+  .st-active{background:var(--soft-green);color:#15803d}
   .step .bar{position:absolute;left:0;bottom:0;height:3px;width:0;background:#3b82f6;transition:width .4s}
   .step.running .bar{width:70%;animation:pulse 1.2s infinite}
   .step.completed .bar{width:100%;background:var(--green)}
   .step.failed .bar{width:100%;background:var(--red)}
   .step.unavailable .bar{width:100%;background:var(--amber)}
   .step.timed_out .bar{width:100%;background:var(--amber)}
+  .step.active .bar{width:100%;background:var(--green)}
   @keyframes pulse{0%{width:20%}50%{width:80%}100%{width:30%}}
 
   .results{display:none;margin-top:30px}
@@ -223,6 +226,7 @@ function setStep(key, status, msg){
     failed: 'Failed',
     unavailable: 'Unavailable',
     timed_out: 'Timed Out',
+    cancelled: 'Cancelled',
     available: 'Available',
     not_started: 'Not Started'
   };
@@ -342,7 +346,7 @@ function renderResults(report){
     ? '<span class="src-mark mark-illus">SIMULATED MONITOR — SAMPLE DATA</span>'
     : (mon.message || 'Monitoring available on demand.');
   const monHtml = `<div style="font-size:14px">${monStatusInitial}</div>
-    <div class="actions" style="margin-top:12px"><button class="btn btn-ghost" onclick="doMonitor()">Monitor RBI directory</button><span id="mon-status" class="src-link" style="margin-left:10px;display:inline-flex;align-items:center"></span></div>`;
+    <div class="actions" style="margin-top:12px"><button id="monitor-btn" class="btn btn-ghost" onclick="doMonitor()">Monitor RBI directory</button><span id="mon-status" class="src-link" style="margin-left:10px;display:inline-flex;align-items:center"></span></div>`;
 
   const deductions = fmtList(score.deductions||[], item => {
     let reason = item.reason;
@@ -421,6 +425,10 @@ function renderResults(report){
   `;
   document.getElementById('results').classList.add('show');
   window.__lastReport = r;
+  const monitorButton = document.getElementById('monitor-btn');
+  if (monitorButton && r.monitor && ['active','paused'].includes(String(r.monitor.status).toLowerCase())) {
+    monitorButton.disabled = true;
+  }
 }
 
 function handleEvent(data){
@@ -433,6 +441,34 @@ function handleEvent(data){
     receivedTerminalEvent = data.status === 'completed';
     if(data.report) renderResults(data.report);
     return;
+  }
+  function pollService(step, runId){
+    if(!runId) return;
+    const endpoint = step === 'agent' ? '/api/agent/status' : '/api/research/status';
+    let attempts = 0;
+    const poll = async () => {
+      if(attempts++ >= 60) return;
+      try {
+        const res = await fetch(apiUrl(`${endpoint}?run_id=${encodeURIComponent(runId)}`), {cache:'no-store'});
+        const data = await res.json();
+        const status = (data.status || 'unavailable').toLowerCase();
+        setStep(step, status, data.error || (status === 'completed' ? 'Result received.' : `TinyFish status: ${status}.`));
+        collected[step] = {step, status, data};
+        if(window.__lastReport) {
+          window.__lastReport[step === 'agent' ? 'rbi' : 'research'] =
+            {...window.__lastReport[step === 'agent' ? 'rbi' : 'research'], ...data};
+          window.__lastReport.service_statuses[step] = status;
+          if(status === 'completed' || ['failed','cancelled','timed_out','unavailable'].includes(status)) {
+            renderResults(window.__lastReport);
+          }
+        }
+        if(status === 'completed' || ['failed','cancelled','timed_out','unavailable'].includes(status)) return;
+      } catch(err) {
+        console.error(`${step} status polling failed`, err);
+      }
+      setTimeout(poll, 5000);
+    };
+    setTimeout(poll, 5000);
   }
   if(step==='monitor'){ setStep('monitor', data.status||'not_started', data.message); return; }
   if(STEP_MAP[step]){
@@ -471,6 +507,8 @@ function investigate(){
     try{
       const data = JSON.parse(e.data);
       handleEvent(data);
+      if(data.step === 'agent' && data.data && data.data.run_id) pollService('agent', data.data.run_id);
+      if(data.step === 'research' && data.data && (data.data.research_run_id || data.data.run_id)) pollService('research', data.data.research_run_id || data.data.run_id);
       if(data.step === 'final' || data.step === 'error'){
         btn.disabled=false;
         btn.textContent='INVESTIGATE';
@@ -506,18 +544,29 @@ function anotherApp(){
 }
 async function doMonitor(){
   const st=document.getElementById('mon-status');
+  const button=document.getElementById('monitor-btn');
+  if(button && button.disabled) return;
+  if(button) button.disabled=true;
   st.innerHTML='<span style="color:#3b82f6;font-size:13px">Creating monitor…</span>';
   try{
     const res=await fetch(apiUrl('/api/watch'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     const d=await res.json();
     if(d.demo) {
       st.innerHTML='<span class="badge" style="background:#fef3c7;color:#92400e">SIMULATED MONITOR — SAMPLE DATA</span> <span style="font-size:13px;color:#64748b;margin-left:6px">Monitoring the RBI directory (simulated).</span>';
+      setStep('monitor','active','Simulated monitor active (ID: demo-monitor-001).');
     } else if(d.ok) {
       st.innerHTML=`<span class="badge" style="background:#dcfce7;color:#15803d">MONITOR ACTIVE</span> <span style="font-size:13px;color:#15803d;margin-left:6px">${esc(d.message || 'Monitor created')} (ID: ${esc(d.monitor_id||'')})</span>`;
+      setStep('monitor','active',`Monitor active (ID: ${d.monitor_id||'unknown'}).`);
+      if(window.__lastReport) {
+        window.__lastReport.monitor = {...window.__lastReport.monitor, ...d, status:'active'};
+        window.__lastReport.service_statuses.monitor = 'active';
+      }
     } else {
+      if(button) button.disabled=false;
       st.innerHTML=`<span class="badge" style="background:#fee2e2;color:#dc2626">MONITOR UNAVAILABLE</span> <span style="font-size:13px;color:#dc2626;margin-left:6px">${esc(d.message||d.error||'Creation failed')}</span>`;
     }
   }catch(e){
+    if(button) button.disabled=false;
     st.innerHTML='<span style="color:#dc2626;font-size:13px">Monitor request failed.</span>';
   }
 }

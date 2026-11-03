@@ -47,9 +47,12 @@ async def create_monitor(webhook_url: str | None = None, schedule_cron: str = "0
         created = await client.monitors.create("fetch", config, schedule_cron, **kwargs)
         monitor = getattr(created, "monitor", None)
         out["monitor_id"] = getattr(monitor, "id", None)
-        out["status"] = str(getattr(monitor, "status", "created"))
-        out["ok"] = True
+        out["status"] = str(getattr(monitor, "status", "ACTIVE")).split(".")[-1].lower()
+        out["ok"] = bool(out["monitor_id"])
         out["message"] = f"Monitor created on RBI directory (ID: {out['monitor_id']})."
+        if not out["ok"]:
+            out["error"] = "TinyFish returned a monitor without an ID"
+            out["status"] = "unavailable"
     except Exception as exc:
         name = type(exc).__name__
         msg = str(exc)
