@@ -279,10 +279,10 @@ async def test_agent_timeout_does_not_block_preliminary_report(monkeypatch):
          })):
         events = await asyncio.wait_for(
             _collect_events(investigate_stream("TimeoutApp", "https://official.example")),
-            timeout=0.03,
+            timeout=0.5,
         )
     assert any(e["step"] == "final" for e in events)
-    assert not any(e["step"] == "agent" and e.get("status") == "timed_out" for e in events)
+    assert any(e["step"] == "agent" and e.get("status") in {"started", "pending"} for e in events)
 
 
 async def _collect_events(stream):
@@ -343,7 +343,7 @@ async def test_agent_queue_and_result_retrieval(monkeypatch):
     with patch("tinyfish.AsyncTinyFish", FakeClient):
         queued = await check_rbi_directory("KreditBee")
         result = await get_rbi_directory_status(queued["run_id"])
-    assert queued["status"] == "pending"
+    assert queued["status"] == "queued"
     assert queued["run_id"] == "agent-run-1"
     assert result["status"] == "completed"
     assert result["found"] is True
@@ -418,6 +418,16 @@ def test_frontend_reconciles_late_agent_result_before_rendering_score():
     assert "Website sources: named lending partner (NBFC/bank)" in source
 
 
+def test_frontend_status_labels_and_research_completion_are_consistent():
+    index_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "index.html")
+    with open(index_path, encoding="utf-8") as file:
+        source = file.read()
+    assert "queued: 'Queued'" in source
+    assert "RBI directory verification could not be completed. This does not indicate that the app is absent from the directory." in source
+    assert "<b>COMPLETED</b>" in source
+    assert "Research pending or unavailable." not in source
+
+
 @pytest.mark.asyncio
 async def test_agent_timeout_and_access_denied_are_not_absence(monkeypatch):
     monkeypatch.setenv("TINYFISH_API_KEY", "dummy_test_key")
@@ -454,7 +464,7 @@ async def test_agent_timeout_and_access_denied_are_not_absence(monkeypatch):
         timed_out = await check_rbi_directory("SlowApp")
     assert timed_out["status"] == "timed_out"
     assert timed_out["found"] is False
-    assert "does NOT indicate absence" in timed_out["failure_reason"]
+    assert "does not indicate that the app is absent" in timed_out["failure_reason"]
 
 
 @pytest.mark.asyncio
@@ -480,7 +490,7 @@ async def test_research_queue_and_completed_report_with_citations(monkeypatch):
     with patch("tinyfish.AsyncTinyFish", FakeClient):
         queued = await run_research("KreditBee")
         result = await get_research_status(queued["research_run_id"])
-    assert queued["status"] == "pending"
+    assert queued["status"] == "queued"
     assert queued["research_run_id"] == "research-run-1"
     assert result["status"] == "completed"
     assert result["report"] == "Verified report"

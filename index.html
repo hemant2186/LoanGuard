@@ -57,6 +57,7 @@
   .step .exp{font-size:12px;color:var(--muted);margin-top:4px;min-height:30px}
   .step .badge{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:3px 8px;border-radius:999px;margin-top:8px}
   .st-pending{background:#f1f5f9;color:#64748b}
+  .st-queued{background:#e2e8f0;color:#475569}
   .st-running{background:#dbeafe;color:#1d4ed8}
   .st-completed{background:var(--soft-green);color:#15803d}
   .st-failed{background:var(--soft-red);color:#b91c1c}
@@ -66,6 +67,7 @@
   .st-active{background:var(--soft-green);color:#15803d}
   .step .bar{position:absolute;left:0;bottom:0;height:3px;width:0;background:#3b82f6;transition:width .4s}
   .step.running .bar{width:70%;animation:pulse 1.2s infinite}
+  .step.queued .bar{width:35%;background:#64748b}
   .step.completed .bar{width:100%;background:var(--green)}
   .step.failed .bar{width:100%;background:var(--red)}
   .step.unavailable .bar{width:100%;background:var(--amber)}
@@ -217,12 +219,13 @@ function renderTimeline(){
 function setStep(key, status, msg){
   const el = document.getElementById('step-'+key);
   if(!el) return;
-  el.classList.remove('running','completed','failed','unavailable','timed_out');
+  el.classList.remove('queued','running','completed','failed','unavailable','timed_out','cancelled','active');
   const normalizedStatus = (status||'pending').toLowerCase().replace(/\s+/g,'_');
   el.classList.add(normalizedStatus);
   const b = el.querySelector('.badge');
   const labelMap = {
     pending: 'Pending',
+    queued: 'Queued',
     running: 'Running',
     completed: 'Completed',
     failed: 'Failed',
@@ -292,10 +295,18 @@ function renderResults(report){
       <div class="chk"><span class="dot no">✕</span><div><b>Simulated RBI directory check</b><br><span class="src-link">This fictional demonstration scenario represents an application not listed in the sample directory data. No live RBI verification was performed.</span></div></div>
       <p style="margin-top:8px;font-size:12px;color:var(--muted)">Simulated sample scoring deduction: 40 points applied to demonstrate high-risk scoring logic.</p>`;
   } else if(!rbi.checked){
-    const rbiStatusLabel = rbi.status === 'timed out' ? 'TIMED OUT' : 'DIRECTORY CHECK UNAVAILABLE';
+    const rbiStatus = String(rbi.status||'unavailable').toLowerCase().replace(/\s+/g,'_');
+    const rbiStatusLabel = rbiStatus === 'timed_out' ? 'TIMED OUT'
+      : rbiStatus === 'queued' ? 'QUEUED'
+      : rbiStatus === 'running' ? 'RUNNING'
+      : rbiStatus === 'failed' ? 'FAILED'
+      : 'UNAVAILABLE';
+    const rbiMessage = rbiStatus === 'timed_out'
+      ? 'RBI directory verification could not be completed. This does not indicate that the app is absent from the directory.'
+      : (rbi.failure_reason||rbi.error||'Directory lookup did not complete or was unreachable.');
     rbiHtml = `
       <div style="margin-bottom:8px"><span class="badge" style="background:#fef3c7;color:#92400e;font-weight:700">${rbiStatusLabel}</span></div>
-      <div class="chk"><span class="dot no">!</span><div><b>RBI directory lookup</b><br><span class="src-link">Could not be checked. ${esc(rbi.failure_reason||rbi.error||'Directory lookup did not complete or was unreachable.')}</span></div></div>
+      <div class="chk"><span class="dot no">!</span><div><b>RBI directory lookup</b><br><span class="src-link">${esc(rbiMessage)}</span></div></div>
       <p style="margin-top:8px;font-size:12px;color:var(--muted)">Safety rule: A failed lookup is NOT treated as absence. A 15-point uncertainty deduction is applied instead of 40.</p>`;
   } else if(rbi.found){
     rbiHtml = `
@@ -338,10 +349,14 @@ function renderResults(report){
 
   let reportHtml;
   if(rs.report){
-    reportHtml = `<div class="report">${esc(rs.report)}</div>`;
+    reportHtml = `<div class="report"><b>COMPLETED</b><br>${esc(rs.report)}</div>`;
   } else {
+    const researchStatus = String(rs.status||'unavailable').toLowerCase().replace(/\s+/g,'_');
+    const researchLabel = researchStatus === 'queued' ? 'QUEUED' : researchStatus === 'running' ? 'RUNNING'
+      : researchStatus === 'failed' ? 'FAILED' : researchStatus === 'cancelled' ? 'CANCELLED'
+      : researchStatus === 'timed_out' ? 'TIMED OUT' : 'UNAVAILABLE';
     reportHtml = `<div class="no-shot" style="text-align:left;line-height:1.6">
-      <b style="color:var(--navy)">Research pending or unavailable.</b> Preliminary evidence summary is based on completed Search and Fetch results.
+      <b style="color:var(--navy)">Research ${researchLabel}.</b> Preliminary evidence summary is based on completed Search and Fetch results.
       <p style="margin-top:8px;font-size:12px;color:var(--muted)">${esc(rs.error || 'Deep research runs asynchronously and does not block the report.')}</p>
     </div>`;
   }
@@ -481,6 +496,18 @@ function reconcileReportScore(report){
     ],
     deductions
   };
+  const limitations = [...report.score.unverified];
+  if(!report.rbi.checked){
+    limitations.push(report.rbi.failure_reason || report.rbi.error || 'RBI directory verification was unavailable.');
+  }
+  if(!report.fetch.ok){
+    limitations.push(report.fetch.error || 'Public website inspection was unavailable.');
+  }
+  if(report.research.status !== 'completed'){
+    limitations.push(report.research.notice || report.research.error || 'Research did not complete.');
+  }
+  report.unverified_findings = [...new Set(limitations)];
+  report.limitations = report.unverified_findings;
   return report;
 }
 
@@ -503,7 +530,10 @@ function pollService(step, runId){
       const res = await fetch(apiUrl(`${endpoint}?run_id=${encodeURIComponent(runId)}`), {cache:'no-store'});
       const data = await res.json();
       const status = (data.status || 'unavailable').toLowerCase();
-      setStep(step, status, data.error || (status === 'completed' ? 'Result received.' : `TinyFish status: ${status}.`));
+      const message = status === 'timed_out' && step === 'agent'
+        ? 'RBI directory verification could not be completed. This does not indicate that the app is absent from the directory.'
+        : (status === 'completed' ? 'Result received.' : (data.error || `TinyFish status: ${status}.`));
+      setStep(step, status, message);
       collected[step] = {step, status, data};
       if(window.__lastReport){
         const key = step === 'agent' ? 'rbi' : 'research';

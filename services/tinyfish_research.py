@@ -35,7 +35,7 @@ async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
     """Queue one cited research report. Never raises or waits for deep research."""
     out: dict[str, Any] = {
         "ok": False,
-        "status": "pending",
+        "status": "queued",
         "report": None,
         "citations": [],
         "run_id": None,
@@ -75,7 +75,7 @@ async def run_research(name: str, site: str | None = None) -> dict[str, Any]:
         out["status"] = "unavailable"
         out["error"] = "Research queue returned no research run ID"
         return out
-    out["status"] = "pending"
+    out["status"] = "queued"
     out["notice"] = "Research is queued asynchronously. Results are retrieved from TinyFish using this run ID."
     return out
 
@@ -98,7 +98,7 @@ async def get_research_status(run_id: str) -> dict[str, Any]:
         return out
     raw_status = _status_text(getattr(response, "status", "UNAVAILABLE"))
     out["provider_status"] = raw_status
-    status_map = {"QUEUED": "pending", "RUNNING": "running", "COMPLETED": "completed",
+    status_map = {"QUEUED": "queued", "RUNNING": "running", "COMPLETED": "completed",
                   "FAILED": "failed", "CANCELLED": "cancelled", "TIMED_OUT": "timed_out"}
     out["status"] = status_map.get(raw_status, "unavailable")
     error = getattr(response, "error", None)

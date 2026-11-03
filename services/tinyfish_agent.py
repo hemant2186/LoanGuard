@@ -138,7 +138,7 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
         )
     except asyncio.TimeoutError:
         out["error"] = f"Agent queue timed out after {QUEUE_TIMEOUT_S}s"
-        out["failure_reason"] = "RBI directory request timed out before a run ID was returned. This does NOT indicate absence."
+        out["failure_reason"] = "RBI directory verification could not be completed. This does not indicate that the app is absent from the directory."
         out["status"] = "timed_out"
         return out
     except Exception as exc:
@@ -155,7 +155,7 @@ async def check_rbi_directory(name: str) -> dict[str, Any]:
         out["status"] = "unavailable"
         return out
     out["raw_status"] = "PENDING"
-    out["status"] = "pending"
+    out["status"] = "queued"
     out["message"] = f"RBI directory check queued (run ID: {out['run_id']})."
     return out
 
@@ -196,11 +196,11 @@ async def get_rbi_directory_status(run_id: str) -> dict[str, Any]:
             out["error"] = error_text or "Agent completed without a structured result"
             out["failure_reason"] = str(out["error"])
     elif raw_status in {"PENDING", "RUNNING"}:
-        out["status"] = raw_status.lower()
+        out["status"] = "queued" if raw_status == "PENDING" else "running"
     elif raw_status in {"TIMED_OUT", "TIMEOUT"} or getattr(error, "code", "") in {"TIMEOUT", "TIMED_OUT"}:
         out["status"] = "timed_out"
         out["error"] = error_text or "Agent run timed out"
-        out["failure_reason"] = f"{out['error']}. This does NOT indicate absence."
+        out["failure_reason"] = "RBI directory verification could not be completed. This does not indicate that the app is absent from the directory."
     else:
         out["status"] = "failed"
         out["error"] = error_text or f"Agent run ended with status {raw_status}"
